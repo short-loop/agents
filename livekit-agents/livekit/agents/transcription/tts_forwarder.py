@@ -192,6 +192,7 @@ class TTSSegmentsForwarder:
         self._audio_data = None
 
     def push_text(self, text: str) -> None:
+        logger.info("push_text", extra={"text": text})
         self._check_not_closed()
 
         if self._text_data is None:
