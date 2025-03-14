@@ -631,6 +631,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                     self._playing_speech is None
                     or self._playing_speech.allow_interruptions
                 ):
+                    logger.info("calling _synthesize_agent_reply from _on_final_transcript")
                     self._synthesize_agent_reply()
 
             self._deferred_validation.on_human_final_transcript(
@@ -709,6 +710,8 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         if self._human_input is not None and not self._human_input.speaking:
             self._update_state("thinking", 0.2)
+
+        logger.info(f"_synthesize_agent_reply _transcribed_text: {self._transcribed_text}")
 
         self._pending_agent_reply = new_handle = SpeechHandle.create_assistant_reply(
             allow_interruptions=self._opts.allow_interruptions,
@@ -1171,6 +1174,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                     )
 
             if should_ignore_input:
+                logger.info("_validate_reply_if_possible ignoring input")
                 self._transcribed_text = ""
                 return
 
@@ -1182,6 +1186,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             # in order to keep the conversation flowing.
             # transcript could be empty at this moment, if the user interrupted the agent
             # but did not generate any transcribed text.
+            logger.info("calling _synthesize_agent_reply from _validate_reply_if_possible")
             self._synthesize_agent_reply()
 
         assert self._pending_agent_reply is not None
@@ -1355,6 +1360,7 @@ class _DeferredReplyValidation:
 
         delay = self._compute_delay()
         if delay is not None:
+            logger.info("calling _run from on_human_final_transcript")
             self._run(delay)
 
     def on_human_start_of_speech(self, ev: vad.VADEvent) -> None:
@@ -1370,6 +1376,7 @@ class _DeferredReplyValidation:
 
         delay = self._compute_delay()
         if delay is not None:
+            logger.info("calling _run from on_human_end_of_speech")
             self._run(delay)
 
     async def aclose(self) -> None:
