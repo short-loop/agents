@@ -681,8 +681,8 @@ class LLMStream(llm.LLMStream):
         )
         fastest = done.pop().result()
 
-        for task in pending:
-            task.cancel()
+        # for task in pending:
+        #     task.cancel()
 
         return fastest
 
