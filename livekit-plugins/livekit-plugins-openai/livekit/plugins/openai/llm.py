@@ -743,9 +743,9 @@ class LLMStream(llm.LLMStream):
             # for first chunk
             for choice in first_chunk.choices:
                 chat_chunk = self._parse_choice(first_chunk.id, choice)
+                logger.info(f"sending first chunk by {time.time() - start_inference}")
                 if chat_chunk is not None:
                     retryable = False
-                    logger.info(f"sending first chunk {chat_chunk} by {time.time() - start_inference}")
                     self._event_ch.send_nowait(chat_chunk)
 
             if first_chunk.usage is not None:
@@ -761,25 +761,26 @@ class LLMStream(llm.LLMStream):
                     )
                 )
 
-            async for chunk in stream:
-                for choice in chunk.choices:
-                    chat_chunk = self._parse_choice(chunk.id, choice)
-                    if chat_chunk is not None:
-                        retryable = False
-                        self._event_ch.send_nowait(chat_chunk)
+            async with stream:
+                async for chunk in stream:
+                    for choice in chunk.choices:
+                        chat_chunk = self._parse_choice(chunk.id, choice)
+                        if chat_chunk is not None:
+                            retryable = False
+                            self._event_ch.send_nowait(chat_chunk)
 
-                if chunk.usage is not None:
-                    usage = chunk.usage
-                    self._event_ch.send_nowait(
-                        llm.ChatChunk(
-                            request_id=chunk.id,
-                            usage=llm.CompletionUsage(
-                                completion_tokens=usage.completion_tokens,
-                                prompt_tokens=usage.prompt_tokens,
-                                total_tokens=usage.total_tokens,
-                            ),
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                        self._event_ch.send_nowait(
+                            llm.ChatChunk(
+                                request_id=chunk.id,
+                                usage=llm.CompletionUsage(
+                                    completion_tokens=usage.completion_tokens,
+                                    prompt_tokens=usage.prompt_tokens,
+                                    total_tokens=usage.total_tokens,
+                                ),
+                            )
                         )
-                    )
 
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable)
