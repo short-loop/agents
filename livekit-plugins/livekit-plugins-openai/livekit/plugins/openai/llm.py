@@ -733,6 +733,9 @@ class LLMStream(llm.LLMStream):
 
             messages = _build_oai_context(self._chat_ctx, id(self))
 
+            logger.info("starting parallel inference")
+            start_inference = time.time()
+
             stream_id, stream, iterator, first_chunk = await self._parallel_inference(messages, opts)
 
             logger.debug(f"using llm stream {stream_id}")
@@ -742,6 +745,7 @@ class LLMStream(llm.LLMStream):
                 chat_chunk = self._parse_choice(first_chunk.id, choice)
                 if chat_chunk is not None:
                     retryable = False
+                    logger.info(f"sending first chunk {chat_chunk} by {time.time() - start_inference}")
                     self._event_ch.send_nowait(chat_chunk)
 
             if first_chunk.usage is not None:
