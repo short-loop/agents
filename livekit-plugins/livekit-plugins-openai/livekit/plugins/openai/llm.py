@@ -657,6 +657,33 @@ class LLMStream(llm.LLMStream):
         self._parallel_tool_calls = parallel_tool_calls
         self._tool_choice = tool_choice
 
+    async def _stream_with_first_chunk(self, messages, opts):
+        stream = await self._client.chat.completions.create(
+            messages=messages,
+            model=self._model,
+            **opts,
+        )
+        iterator = stream.__aiter__()
+        first_chunk = await iterator.__anext__()
+        return stream, iterator, first_chunk
+
+
+    async def _parallel_inference(self, messages, opts):
+        task1 = asyncio.create_task(self._stream_with_first_chunk(messages, opts))
+        task2 = asyncio.create_task(self._stream_with_first_chunk(messages, opts))
+
+        done, pending = await asyncio.wait(
+            [task1, task2],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        fastest = done.pop().result()
+
+        for task in pending:
+            task.cancel()
+
+        return fastest
+
+
     async def _run(self) -> None:
         if hasattr(self._llm._client, "_refresh_credentials"):
             await self._llm._client._refresh_credentials()
@@ -702,32 +729,48 @@ class LLMStream(llm.LLMStream):
             opts = _strip_nones(opts)
 
             messages = _build_oai_context(self._chat_ctx, id(self))
-            stream = await self._client.chat.completions.create(
-                messages=messages,
-                model=self._model,
-                **opts,
-            )
 
-            async with stream:
-                async for chunk in stream:
-                    for choice in chunk.choices:
-                        chat_chunk = self._parse_choice(chunk.id, choice)
-                        if chat_chunk is not None:
-                            retryable = False
-                            self._event_ch.send_nowait(chat_chunk)
+            stream, iterator, first_chunk = await self._parallel_inference(messages, opts)
 
-                    if chunk.usage is not None:
-                        usage = chunk.usage
-                        self._event_ch.send_nowait(
-                            llm.ChatChunk(
-                                request_id=chunk.id,
-                                usage=llm.CompletionUsage(
-                                    completion_tokens=usage.completion_tokens,
-                                    prompt_tokens=usage.prompt_tokens,
-                                    total_tokens=usage.total_tokens,
-                                ),
-                            )
+            # for first chunk
+            for choice in first_chunk.choices:
+                chat_chunk = self._parse_choice(first_chunk.id, choice)
+                if chat_chunk is not None:
+                    retryable = False
+                    self._event_ch.send_nowait(chat_chunk)
+
+            if first_chunk.usage is not None:
+                usage = first_chunk.usage
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(
+                        request_id=first_chunk.id,
+                        usage=llm.CompletionUsage(
+                            completion_tokens=usage.completion_tokens,
+                            prompt_tokens=usage.prompt_tokens,
+                            total_tokens=usage.total_tokens,
+                        ),
+                    )
+                )
+
+            async for chunk in stream:
+                for choice in chunk.choices:
+                    chat_chunk = self._parse_choice(chunk.id, choice)
+                    if chat_chunk is not None:
+                        retryable = False
+                        self._event_ch.send_nowait(chat_chunk)
+
+                if chunk.usage is not None:
+                    usage = chunk.usage
+                    self._event_ch.send_nowait(
+                        llm.ChatChunk(
+                            request_id=chunk.id,
+                            usage=llm.CompletionUsage(
+                                completion_tokens=usage.completion_tokens,
+                                prompt_tokens=usage.prompt_tokens,
+                                total_tokens=usage.total_tokens,
+                            ),
                         )
+                    )
 
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable)
