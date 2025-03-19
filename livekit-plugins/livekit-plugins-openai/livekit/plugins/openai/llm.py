@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, MutableSet, Union
 
@@ -657,7 +658,8 @@ class LLMStream(llm.LLMStream):
         self._parallel_tool_calls = parallel_tool_calls
         self._tool_choice = tool_choice
 
-    async def _stream_with_first_chunk(self, messages, opts):
+    async def _stream_with_first_chunk(self, stream_id, messages, opts):
+        start = time.time()
         stream = await self._client.chat.completions.create(
             messages=messages,
             model=self._model,
@@ -665,12 +667,13 @@ class LLMStream(llm.LLMStream):
         )
         iterator = stream.__aiter__()
         first_chunk = await iterator.__anext__()
-        return stream, iterator, first_chunk
+        logger.debug(f"stream {stream_id} with ttfb {time.time() - start}")
+        return stream_id, stream, iterator, first_chunk
 
 
     async def _parallel_inference(self, messages, opts):
-        task1 = asyncio.create_task(self._stream_with_first_chunk(messages, opts))
-        task2 = asyncio.create_task(self._stream_with_first_chunk(messages, opts))
+        task1 = asyncio.create_task(self._stream_with_first_chunk(1, messages, opts))
+        task2 = asyncio.create_task(self._stream_with_first_chunk(2, messages, opts))
 
         done, pending = await asyncio.wait(
             [task1, task2],
@@ -730,7 +733,9 @@ class LLMStream(llm.LLMStream):
 
             messages = _build_oai_context(self._chat_ctx, id(self))
 
-            stream, iterator, first_chunk = await self._parallel_inference(messages, opts)
+            stream_id, stream, iterator, first_chunk = await self._parallel_inference(messages, opts)
+
+            logger.debug(f"using llm stream {stream_id}")
 
             # for first chunk
             for choice in first_chunk.choices:
