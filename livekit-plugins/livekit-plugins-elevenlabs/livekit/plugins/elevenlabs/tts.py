@@ -21,6 +21,7 @@ import json
 import os
 import weakref
 from dataclasses import dataclass
+from string import punctuation
 from typing import Any, List, Literal, Optional
 
 import aiohttp
@@ -38,6 +39,7 @@ from livekit.agents import (
 from .log import logger
 from .models import TTSEncoding, TTSModels
 
+punctuations = [".", ",", "!", "?", ":", ";", "'", '"', "(", ")", "[", "]", "{", "}", "-", "_", "`", "‘", "’", "“", "”"]
 _Encoding = Literal["mp3", "pcm"]
 
 
@@ -510,7 +512,7 @@ class SynthesizeStream(tts.SynthesizeStream):
                         received_text += "".join(alignment.get("chars", [])).replace(
                             " ", ""
                         )
-                        if received_text == expected_text:
+                        if _is_matching_string(received_text, expected_text):
                             for frame in audio_bstream.flush():
                                 _send_last_frame(segment_id=segment_id, is_final=False)
                                 last_frame = frame
@@ -550,6 +552,24 @@ def _dict_to_voices_list(data: dict[str, Any]):
             )
         )
     return voices
+
+
+def _is_matching_string(a: str, b: str) -> bool:
+    if len(a) != len(b):
+        return False
+
+    a_lower = a.lower()
+    b_lower = b.lower()
+
+    for i in range(len(a_lower)):
+
+        if a_lower[i] in punctuations or b_lower[i] in punctuations:
+            continue
+        if a_lower[i] != b_lower[i]:
+            logger.error(f"Mismatched tts sentence: {a} : {b}")
+            return False
+
+    return True
 
 
 def _strip_nones(data: dict[str, Any]):
