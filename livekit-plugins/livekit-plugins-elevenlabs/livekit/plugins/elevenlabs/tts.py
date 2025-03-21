@@ -21,7 +21,6 @@ import json
 import os
 import weakref
 from dataclasses import dataclass
-from string import punctuation
 from typing import Any, List, Literal, Optional
 
 import aiohttp
