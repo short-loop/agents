@@ -758,7 +758,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         # others would fail.
         user_input = handle.user_question
         if not user_input.strip():
-            user_input = "<continue>"
+            user_input = "<please repeat>"
         copied_ctx.messages.append(ChatMessage.create(text=user_input, role="user"))
 
         tk = SpeechDataContextVar.set(SpeechData(sequence_id=handle.id))
