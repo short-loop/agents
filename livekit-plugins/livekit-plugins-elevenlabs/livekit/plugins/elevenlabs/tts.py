@@ -281,6 +281,7 @@ class ChunkedStream(tts.ChunkedStream):
             "text": self._input_text,
             "model_id": self._opts.model,
             "voice_settings": voice_settings,
+            "previous_text": "And she softly spoke : "
         }
 
         try:
