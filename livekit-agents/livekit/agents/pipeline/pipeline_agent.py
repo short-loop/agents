@@ -194,6 +194,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         stt: stt.STT,
         llm: LLM,
         tts: tts.TTS,
+        max_volume: float = 1.0,
         turn_detector: _TurnDetector | None = None,
         chat_ctx: ChatContext | None = None,
         fnc_ctx: FunctionContext | None = None,
@@ -285,6 +286,8 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                 stt=stt,
                 vad=vad,
             )
+
+        self._max_volume = max_volume
 
         self._stt, self._vad, self._llm, self._tts = stt, vad, llm, tts
         self._turn_detector = turn_detector
@@ -663,7 +666,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         )
 
-        agent_playout = AgentPlayout(audio_source=audio_source)
+        agent_playout = AgentPlayout(audio_source=audio_source, max_volume=self._max_volume)
         self._agent_output = AgentOutput(
             room=self._room,
             agent_playout=agent_playout,
