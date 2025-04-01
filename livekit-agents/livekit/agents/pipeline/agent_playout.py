@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import numpy as np
+
 import asyncio
 from typing import AsyncIterable, Literal
 
@@ -61,12 +63,13 @@ class PlayoutHandle:
 
 
 class AgentPlayout(utils.EventEmitter[EventTypes]):
-    def __init__(self, *, audio_source: rtc.AudioSource) -> None:
+    def __init__(self, *, audio_source: rtc.AudioSource, max_volume: float) -> None:
         super().__init__()
         self._audio_source = audio_source
         self._target_volume = 1.0
         self._playout_atask: asyncio.Task[None] | None = None
         self._closed = False
+        self._abs_max_volume = max_volume
 
     @property
     def target_volume(self) -> float:
@@ -145,7 +148,9 @@ class AgentPlayout(utils.EventEmitter[EventTypes]):
                     first_frame = False
 
                 handle._pushed_duration += frame.samples_per_channel / frame.sample_rate
-                await self._audio_source.capture_frame(frame)
+                v_frame = _set_volume_for_chunk(frame, self._abs_max_volume)
+
+                await self._audio_source.capture_frame(v_frame)
 
             if self._audio_source.queued_duration > 0:
                 await self._audio_source.wait_for_playout()
@@ -182,3 +187,17 @@ class AgentPlayout(utils.EventEmitter[EventTypes]):
                     "interrupted": handle.interrupted,
                 },
             )
+
+def _set_volume_for_chunk(frame: rtc.AudioFrame, volume: float) -> rtc.AudioFrame:
+    if volume == 1.0:
+        return frame
+
+    data = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32)
+    data *= 10 ** (np.log10(volume))
+    data = np.clip(data, -32768, 32767).astype(np.int16)
+    return rtc.AudioFrame(
+        data=data.tobytes(),
+        num_channels=frame.num_channels,
+        samples_per_channel=frame.samples_per_channel,
+        sample_rate=frame.sample_rate
+    )
