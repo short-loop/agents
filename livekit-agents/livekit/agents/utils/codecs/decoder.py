@@ -13,10 +13,15 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import io
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncIterator, Optional
 
+import av
+import av.container
+from livekit import rtc
+from livekit.agents.log import logger
 from livekit.agents.utils import aio
 
 try:
@@ -25,8 +30,6 @@ try:
 except ImportError:
     pass
 import threading
-
-from livekit import rtc
 
 
 class StreamBuffer:
@@ -39,14 +42,14 @@ class StreamBuffer:
         self._buffer = io.BytesIO()
         self._lock = threading.Lock()
         self._data_available = threading.Condition(self._lock)
-        self._eof = False  # EOF flag to signal no more writes
+        self._eof = False
 
     def write(self, data: bytes):
         """Write data to the buffer from a writer thread."""
-        with self._data_available:  # Lock and notify readers
-            self._buffer.seek(0, io.SEEK_END)  # Move to the end
+        with self._data_available:
+            self._buffer.seek(0, io.SEEK_END)
             self._buffer.write(data)
-            self._data_available.notify_all()  # Notify waiting readers
+            self._data_available.notify_all()
 
     def read(self, size: int = -1) -> bytes:
         """Read data from the buffer in a reader thread."""
@@ -56,21 +59,21 @@ class StreamBuffer:
 
         with self._data_available:
             while True:
-                self._buffer.seek(0)  # Rewind for reading
+                if self._buffer.closed:
+                    return b""
+                # always read from beginning
+                self._buffer.seek(0)
                 data = self._buffer.read(size)
 
-                # If data is available, return it
                 if data:
-                    # Shrink the buffer to remove already-read data
+                    # shrink the buffer to remove already-read data
                     remaining = self._buffer.read()
                     self._buffer = io.BytesIO(remaining)
                     return data
 
-                # If EOF is signaled and no data remains, return EOF
                 if self._eof:
                     return b""
 
-                # Wait for more data
                 self._data_available.wait()
 
     def end_input(self):
@@ -113,6 +116,7 @@ class AudioStreamDecoder:
         self._started = False
         self._input_buf = StreamBuffer()
         self._loop = asyncio.get_event_loop()
+
         if self.__class__._executor is None:
             # each decoder instance will submit jobs to the shared pool
             self.__class__._executor = ThreadPoolExecutor(
@@ -129,54 +133,57 @@ class AudioStreamDecoder:
         self._input_buf.end_input()
 
     def _decode_loop(self):
-        container = av.open(self._input_buf)
-        audio_stream = next(s for s in container.streams if s.type == "audio")
-        resampler = av.AudioResampler(
-            # convert to signed 16-bit little endian
-            format="s16",
-            layout=self._layout,
-            rate=self._sample_rate,
-        )
+        container: av.container.InputContainer | None = None
+        resampler: av.AudioResampler | None = None
         try:
-            # TODO: handle error where audio stream isn't found
-            if not audio_stream:
-                return
+            container = av.open(self._input_buf, mode="r")
+            if len(container.streams.audio) == 0:
+                raise ValueError("no audio stream found")
+
+            audio_stream = container.streams.audio[0]
+            resampler = av.AudioResampler(
+                format="s16", layout=self._layout, rate=self._sample_rate
+            )
+
             for frame in container.decode(audio_stream):
                 if self._closed:
                     return
+
                 for resampled_frame in resampler.resample(frame):
                     nchannels = len(resampled_frame.layout.channels)
-                    data = resampled_frame.to_ndarray().tobytes()
-                    self._output_ch.send_nowait(
+                    self._loop.call_soon_threadsafe(
+                        self._output_ch.send_nowait,
                         rtc.AudioFrame(
-                            data=data,
+                            data=resampled_frame.to_ndarray().tobytes(),
                             num_channels=nchannels,
                             sample_rate=int(resampled_frame.sample_rate),
                             samples_per_channel=int(
                                 resampled_frame.samples / nchannels
                             ),
-                        )
+                        ),
                     )
+
+        except Exception:
+            logger.exception("error decoding audio")
         finally:
-            self._output_ch.close()
+            self._loop.call_soon_threadsafe(self._output_ch.close)
+            if container:
+                container.close()
 
     def __aiter__(self) -> AsyncIterator[rtc.AudioFrame]:
         return self
 
     async def __anext__(self) -> rtc.AudioFrame:
-        try:
-            return await self._output_ch.recv()
-        except aio.ChanClosed:
-            raise StopAsyncIteration
+        return await self._output_ch.__anext__()
 
     async def aclose(self):
         if self._closed:
             return
-        self._closed = True
+
         self.end_input()
+        self._closed = True
         self._input_buf.close()
-        # wait for decode loop to finish
-        try:
-            await self._output_ch.recv()
-        except aio.ChanClosed:
-            pass
+        # wait for decode loop to finish, only if anything's been pushed
+        with contextlib.suppress(aio.ChanClosed):
+            if self._started:
+                await self._output_ch.recv()

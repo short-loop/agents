@@ -3,12 +3,10 @@ name: CI
 on:
   push:
     branches:
-      - main
-      - dev
+      - 0.x
   pull_request:
     branches:
-      - main
-      - dev
+      - 0.x
   workflow_dispatch:
 
 jobs:
@@ -83,4 +81,5 @@ jobs:
                -p livekit.plugins.playai \
                -p livekit.plugins.assemblyai \
                -p livekit.plugins.rime \
-               -p livekit.plugins.aws
+               -p livekit.plugins.aws \
+               -p livekit.plugins.speechmatics

@@ -69,6 +69,8 @@ class ContentPart(TypedDict):
 
 class InputAudioTranscription(TypedDict):
     model: InputTranscriptionModel | str
+    language: NotRequired[str]
+    prompt: NotRequired[str]
 
 
 class ServerVad(TypedDict):
@@ -77,6 +79,13 @@ class ServerVad(TypedDict):
     prefix_padding_ms: NotRequired[int]
     silence_duration_ms: NotRequired[int]
     create_response: NotRequired[bool]
+
+
+class SemanticVad(TypedDict):
+    type: Literal["semantic_vad"]
+    eagerness: NotRequired[Literal["low", "medium", "high", "auto"]]
+    create_response: NotRequired[bool]
+    interrupt_response: NotRequired[bool]
 
 
 class FunctionTool(TypedDict):
@@ -189,7 +198,7 @@ class Resource:
         input_audio_format: AudioFormat
         output_audio_format: AudioFormat
         input_audio_transcription: InputAudioTranscription | None
-        turn_detection: ServerVad | None
+        turn_detection: Union[ServerVad, SemanticVad, None]
         tools: list[FunctionTool]
         tool_choice: ToolChoice
         temperature: float
@@ -218,7 +227,7 @@ class ClientEvent:
         input_audio_format: AudioFormat
         output_audio_format: AudioFormat
         input_audio_transcription: InputAudioTranscription | None
-        turn_detection: ServerVad | None
+        turn_detection: Union[ServerVad, SemanticVad, None]
         tools: list[FunctionTool]
         tool_choice: ToolChoice
         temperature: float
