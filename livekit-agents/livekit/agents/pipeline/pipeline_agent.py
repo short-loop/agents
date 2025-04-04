@@ -611,6 +611,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             self._deferred_validation.on_human_end_of_speech(ev)
 
         def _on_interim_transcript(ev: stt.SpeechEvent) -> None:
+            logger.info(f"interim_text {ev.alternatives[0].text}")
             self._transcribed_interim_text = ev.alternatives[0].text
 
         def _on_final_transcript(ev: stt.SpeechEvent) -> None:
@@ -1349,6 +1350,9 @@ class _DeferredReplyValidation:
             delay -= elapsed_time
         else:
             delay = 0
+
+        if delay > 1:
+            logger.info(f"delay is greater than 1 {delay}")
         return delay
 
     def on_human_final_transcript(self, transcript: str, language: str | None) -> None:
