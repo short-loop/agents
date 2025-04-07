@@ -1296,7 +1296,7 @@ class _DeferredReplyValidation:
     PUNCTUATION = ".!?"
     PUNCTUATION_REDUCE_FACTOR = 0.75
 
-    FINAL_TRANSCRIPT_TIMEOUT = 5
+    FINAL_TRANSCRIPT_TIMEOUT = 1
 
     def __init__(
         self,
@@ -1337,6 +1337,7 @@ class _DeferredReplyValidation:
         # to prevent the agent from getting "stuck"
         # in this case, the agent will not have final transcript, so it'll trigger the user input with empty
         if not self._last_final_transcript:
+            logger.info("is_final not received, returning FINAL_TRANSCRIPT_TIMEOUT")
             return self.FINAL_TRANSCRIPT_TIMEOUT
 
         delay = self._end_of_speech_delay
