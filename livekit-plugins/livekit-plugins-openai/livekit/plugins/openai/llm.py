@@ -747,9 +747,15 @@ class LLMStream(llm.LLMStream):
 
             logger.debug(f"using llm stream {stream_id}")
 
+            buffer: str = ""
+            discard_flag = False
+
             # for first chunk
             for choice in first_chunk.choices:
-                chat_chunk = self._parse_choice(first_chunk.id, choice)
+                chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice)
+                if discarded_str is not None:
+                    discard_flag = True
+                    buffer = buffer + discarded_str
                 logger.info(f"sending first chunk by {time.time() - start_inference}")
                 if chat_chunk is not None:
                     retryable = False
@@ -771,7 +777,10 @@ class LLMStream(llm.LLMStream):
             async with stream:
                 async for chunk in stream:
                     for choice in chunk.choices:
-                        chat_chunk = self._parse_choice(chunk.id, choice)
+                        chat_chunk, discarded_str = self._parse_choice(chunk.id, choice, discard_flag)
+                        if discarded_str is not None:
+                            discard_flag = True
+                            buffer = buffer + discarded_str
                         if chat_chunk is not None:
                             retryable = False
                             self._event_ch.send_nowait(chat_chunk)
@@ -789,6 +798,8 @@ class LLMStream(llm.LLMStream):
                             )
                         )
 
+                logger.info(f"finished stream: {buffer}")
+
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable)
         except openai.APIStatusError as e:
@@ -801,7 +812,7 @@ class LLMStream(llm.LLMStream):
         except Exception as e:
             raise APIConnectionError(retryable=retryable) from e
 
-    def _parse_choice(self, id: str, choice: Choice) -> llm.ChatChunk | None:
+    def _parse_choice(self, id: str, choice: Choice, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
 
         # https://github.com/livekit/agents/issues/688
@@ -834,15 +845,26 @@ class LLMStream(llm.LLMStream):
             # we're done with the tool calls, run the last one
             return self._try_build_function(id, choice)
 
+        if discard:
+            return None, delta.content
+
+        content = delta.content
+        discarded: str | None = None
+        if delta.content is not None:
+            if content.find('['):
+                content = content[0:content.find('[')]
+                discarded = discarded or "" + content[content.find('['):]
+
+
         return llm.ChatChunk(
             request_id=id,
             choices=[
                 llm.Choice(
-                    delta=llm.ChoiceDelta(content=delta.content, role="assistant"),
+                    delta=llm.ChoiceDelta(content=content, role="assistant"),
                     index=choice.index,
                 )
             ],
-        )
+        ), discarded
 
     def _try_build_function(self, id: str, choice: Choice) -> llm.ChatChunk | None:
         if not self._fnc_ctx:
