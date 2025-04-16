@@ -753,7 +753,7 @@ class LLMStream(llm.LLMStream):
             # for first chunk
             for choice in first_chunk.choices:
                 chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice)
-                if discarded_str is not None:
+                if discarded_str is not None and len(discarded_str.strip()) > 0:
                     discard_flag = True
                     buffer = buffer + discarded_str
                 logger.info(f"sending first chunk by {time.time() - start_inference}")
