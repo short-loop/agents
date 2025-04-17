@@ -747,7 +747,7 @@ class LLMStream(llm.LLMStream):
 
             logger.debug(f"using llm stream {stream_id}")
 
-            buffer: str = ""
+            discarded_buffer: str = ""
             discard_flag = False
 
             # for first chunk
@@ -755,7 +755,7 @@ class LLMStream(llm.LLMStream):
                 chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice)
                 if discarded_str is not None and len(discarded_str.strip()) > 0:
                     discard_flag = True
-                    buffer = buffer + discarded_str
+                    discarded_buffer = discarded_buffer + discarded_str
                 logger.info(f"sending first chunk by {time.time() - start_inference}")
                 if chat_chunk is not None:
                     retryable = False
@@ -780,7 +780,7 @@ class LLMStream(llm.LLMStream):
                         chat_chunk, discarded_str = self._parse_choice(chunk.id, choice, discard_flag)
                         if discarded_str is not None:
                             discard_flag = True
-                            buffer = buffer + discarded_str
+                            discarded_buffer = discarded_buffer + discarded_str
                         if chat_chunk is not None:
                             retryable = False
                             self._event_ch.send_nowait(chat_chunk)
@@ -798,7 +798,7 @@ class LLMStream(llm.LLMStream):
                             )
                         )
 
-                logger.info(f"finished stream: {buffer}")
+                logger.info(f"discarded buffer: {discarded_buffer}")
 
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable)
