@@ -851,9 +851,10 @@ class LLMStream(llm.LLMStream):
         content = delta.content
         discarded: str | None = None
         if delta.content is not None:
-            if content.find('['):
-                content = content[0:content.find('[')]
-                discarded = discarded or "" + content[content.find('['):]
+            res = content.find('[')
+            if res != -1:
+                content = content[0:res]
+                discarded = discarded or "" + content[res:]
 
 
         return llm.ChatChunk(
