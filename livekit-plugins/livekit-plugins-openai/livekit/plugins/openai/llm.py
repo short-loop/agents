@@ -19,6 +19,7 @@ import asyncio
 import datetime
 import os
 import time
+import json
 from dataclasses import dataclass
 from typing import Any, Literal, MutableSet, Union
 
@@ -33,7 +34,7 @@ from livekit.agents import (
 from livekit.agents.llm import (
     LLMCapabilities,
     ToolChoice,
-    _create_ai_function_info,
+    _create_ai_function_info, ChoiceDelta, FunctionToolCall
 )
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
 
@@ -798,7 +799,28 @@ class LLMStream(llm.LLMStream):
                             )
                         )
 
-                logger.info(f"discarded buffer: {discarded_buffer}")
+                logger.debug(f"LLMStream _run discarded buffer: {discarded_buffer}")
+                # create a function call chunk if we have a discarded buffer
+                if len(discarded_buffer.strip()) > 0:
+                    res = _get_arguments_from_text_fnc_call(discarded_buffer)
+                    if res is not None:
+                        chunk = self._parse_choice("", Choice(
+                            finish_reason="tool_calls",
+                            index=0,
+                            delta=ChoiceDelta(
+                                tool_calls=[
+                                    FunctionToolCall(
+                                        arguments=res[1],
+                                        name=res[0],
+                                        call_id="txt-fnc-" + str(time.time()),
+                                    )
+                                ]
+                            )
+                        ))
+
+                        if chunk is not None:
+                            retryable = False
+                            self._event_ch.send_nowait(chunk)
 
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable)
@@ -814,6 +836,7 @@ class LLMStream(llm.LLMStream):
 
     def _parse_choice(self, id: str, choice: Choice, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
+        choice.delta.tool_calls
 
         # https://github.com/livekit/agents/issues/688
         # the delta can be None when using Azure OpenAI using content filtering
@@ -923,3 +946,24 @@ def _get_api_key(env_var: str, key: str | None) -> str:
             f"{env_var} is required, either as argument or set {env_var} environmental variable"
         )
     return key
+
+def _get_arguments_from_text_fnc_call(text: str) -> tuple[str, str] | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        return None
+
+    args_str = text[start:end + 1]
+    args_str = args_str.replace("'", '"')
+    fnc_start = text.find("`") + 1
+    fnc_end = text.find("(", fnc_start)
+    if fnc_start == 0 or fnc_end == -1:
+        return None
+
+    function_name = text[fnc_start:fnc_end]
+
+    try:
+        json.loads(args_str) # just validate the json
+        return function_name, args_str
+    except json.JSONDecodeError:
+        return None
