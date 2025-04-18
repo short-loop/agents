@@ -874,10 +874,11 @@ class LLMStream(llm.LLMStream):
         content = delta.content
         discarded: str | None = None
         if delta.content is not None:
+            original_content = content  # Preserve the original value of content
             res = content.find('[')
             if res != -1:
                 content = content[0:res]
-                discarded = discarded or "" + content[res:]
+                discarded = discarded or "" + original_content[res:]
 
 
         return llm.ChatChunk(
