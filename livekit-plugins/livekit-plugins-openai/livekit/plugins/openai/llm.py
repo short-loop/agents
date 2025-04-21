@@ -809,31 +809,32 @@ class LLMStream(llm.LLMStream):
                             )
                         )
 
-                logger.debug(f"LLMStream _run discarded buffer: {discarded_buffer}")
-                # create a function call chunk if we have a discarded buffer
-                if len(discarded_buffer.strip()) > 0:
-                    res = _get_arguments_from_text_fnc_call(discarded_buffer)
-                    if res is not None:
-                        chunk = self._parse_choice("", Choice(
-                            finish_reason="tool_calls",
-                            index=0,
-                            delta=ChoiceDelta(
-                                tool_calls=[
-                                    ChoiceDeltaToolCall(
-                                        index=0,
-                                        id=f"fnc-call-{time.time()}",
-                                        function=ChoiceDeltaToolCallFunction(
-                                            name=res.name,
-                                            arguments=res.arguments,
-                                        )
-                                    )
-                                ],
-                            )
-                        ))
-
-                        if chunk is not None:
-                            retryable = False
-                            self._event_ch.send_nowait(chunk)
+                # TODO: handle discarded buffer by sending it as a separate function call chunk
+                # logger.debug(f"LLMStream _run discarded buffer: {discarded_buffer}")
+                # # create a function call chunk if we have a discarded buffer
+                # if len(discarded_buffer.strip()) > 0:
+                #     res = _get_arguments_from_text_fnc_call(discarded_buffer)
+                #     if res is not None:
+                #         chunk = self._parse_choice("", Choice(
+                #             finish_reason="tool_calls",
+                #             index=0,
+                #             delta=ChoiceDelta(
+                #                 tool_calls=[
+                #                     ChoiceDeltaToolCall(
+                #                         index=0,
+                #                         id=f"fnc-call-{time.time()}",
+                #                         function=ChoiceDeltaToolCallFunction(
+                #                             name=res.name,
+                #                             arguments=res.arguments,
+                #                         )
+                #                     )
+                #                 ],
+                #             )
+                #         ))
+                #
+                #         if chunk is not None:
+                #             retryable = False
+                #             self._event_ch.send_nowait(chunk)
 
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable)
@@ -880,10 +881,12 @@ class LLMStream(llm.LLMStream):
             # we're done with the tool calls, run the last one
             return self._try_build_function(id, choice)
 
+        content = delta.content
+
         if discard:
+            logger.debug(f"discarding content: {delta.content}")
             return None, delta.content
 
-        content = delta.content
         discarded: str | None = None
         if delta.content is not None:
             original_content = content  # Preserve the original value of content
@@ -891,7 +894,7 @@ class LLMStream(llm.LLMStream):
             if res != -1:
                 content = content[0:res]
                 discarded = discarded or "" + original_content[res:]
-
+                logger.debug(f"discarding content: {discarded}")
 
         return llm.ChatChunk(
             request_id=id,
