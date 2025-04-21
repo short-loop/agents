@@ -19,6 +19,7 @@ import asyncio
 import datetime
 import os
 import time
+import json
 from dataclasses import dataclass
 from typing import Any, Literal, MutableSet, Union
 
@@ -33,13 +34,18 @@ from livekit.agents import (
 from livekit.agents.llm import (
     LLMCapabilities,
     ToolChoice,
-    _create_ai_function_info,
+    _create_ai_function_info
 )
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
 
 import openai
 from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
-from openai.types.chat.chat_completion_chunk import Choice
+from openai.types.chat.chat_completion_chunk import (
+    Choice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction
+)
 
 from ._oai_api import build_oai_function_description
 from .log import logger
@@ -68,6 +74,11 @@ class LLMOptions:
     store: bool | None = None
     metadata: dict[str, str] | None = None
     max_tokens: int | None = None
+
+@dataclass
+class ParsedFunction:
+    name: str
+    arguments: str
 
 
 class LLM(llm.LLM):
@@ -747,9 +758,15 @@ class LLMStream(llm.LLMStream):
 
             logger.debug(f"using llm stream {stream_id}")
 
+            discarded_buffer: str = ""
+            discard_flag = False
+
             # for first chunk
             for choice in first_chunk.choices:
-                chat_chunk = self._parse_choice(first_chunk.id, choice)
+                chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice)
+                if discarded_str is not None and len(discarded_str.strip()) > 0:
+                    discard_flag = True
+                    discarded_buffer = discarded_buffer + discarded_str
                 logger.info(f"sending first chunk by {time.time() - start_inference}")
                 if chat_chunk is not None:
                     retryable = False
@@ -771,7 +788,10 @@ class LLMStream(llm.LLMStream):
             async with stream:
                 async for chunk in stream:
                     for choice in chunk.choices:
-                        chat_chunk = self._parse_choice(chunk.id, choice)
+                        chat_chunk, discarded_str = self._parse_choice(chunk.id, choice, discard_flag)
+                        if discarded_str is not None:
+                            discard_flag = True
+                            discarded_buffer = discarded_buffer + discarded_str
                         if chat_chunk is not None:
                             retryable = False
                             self._event_ch.send_nowait(chat_chunk)
@@ -789,6 +809,33 @@ class LLMStream(llm.LLMStream):
                             )
                         )
 
+                # TODO: handle discarded buffer by sending it as a separate function call chunk
+                # logger.debug(f"LLMStream _run discarded buffer: {discarded_buffer}")
+                # # create a function call chunk if we have a discarded buffer
+                # if len(discarded_buffer.strip()) > 0:
+                #     res = _get_arguments_from_text_fnc_call(discarded_buffer)
+                #     if res is not None:
+                #         chunk = self._parse_choice("", Choice(
+                #             finish_reason="tool_calls",
+                #             index=0,
+                #             delta=ChoiceDelta(
+                #                 tool_calls=[
+                #                     ChoiceDeltaToolCall(
+                #                         index=0,
+                #                         id=f"fnc-call-{time.time()}",
+                #                         function=ChoiceDeltaToolCallFunction(
+                #                             name=res.name,
+                #                             arguments=res.arguments,
+                #                         )
+                #                     )
+                #                 ],
+                #             )
+                #         ))
+                #
+                #         if chunk is not None:
+                #             retryable = False
+                #             self._event_ch.send_nowait(chunk)
+
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable)
         except openai.APIStatusError as e:
@@ -801,7 +848,7 @@ class LLMStream(llm.LLMStream):
         except Exception as e:
             raise APIConnectionError(retryable=retryable) from e
 
-    def _parse_choice(self, id: str, choice: Choice) -> llm.ChatChunk | None:
+    def _parse_choice(self, id: str, choice: Choice, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
 
         # https://github.com/livekit/agents/issues/688
@@ -834,15 +881,30 @@ class LLMStream(llm.LLMStream):
             # we're done with the tool calls, run the last one
             return self._try_build_function(id, choice)
 
+        content = delta.content
+
+        if discard:
+            logger.debug(f"discarding content: {delta.content}")
+            return None, delta.content
+
+        discarded: str | None = None
+        if delta.content is not None:
+            original_content = content  # Preserve the original value of content
+            res = content.find('[')
+            if res != -1:
+                content = content[0:res]
+                discarded = discarded or "" + original_content[res:]
+                logger.debug(f"discarding content: {discarded}")
+
         return llm.ChatChunk(
             request_id=id,
             choices=[
                 llm.Choice(
-                    delta=llm.ChoiceDelta(content=delta.content, role="assistant"),
+                    delta=llm.ChoiceDelta(content=content, role="assistant"),
                     index=choice.index,
                 )
             ],
-        )
+        ), discarded
 
     def _try_build_function(self, id: str, choice: Choice) -> llm.ChatChunk | None:
         if not self._fnc_ctx:
@@ -900,3 +962,27 @@ def _get_api_key(env_var: str, key: str | None) -> str:
             f"{env_var} is required, either as argument or set {env_var} environmental variable"
         )
     return key
+
+def _get_arguments_from_text_fnc_call(text: str) -> ParsedFunction | None:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        return None
+
+    args_str = text[start:end + 1]
+    args_str = args_str.replace("'", '"')
+    fnc_start = text.find("`") + 1
+    fnc_end = text.find("(", fnc_start)
+    if fnc_start == 0 or fnc_end == -1:
+        return None
+
+    function_name = text[fnc_start:fnc_end]
+
+    try:
+        json.loads(args_str) # just validate the json
+        return ParsedFunction(
+            name=function_name,
+            arguments=args_str
+        )
+    except json.JSONDecodeError:
+        return None
