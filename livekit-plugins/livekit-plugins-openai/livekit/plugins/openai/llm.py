@@ -34,13 +34,18 @@ from livekit.agents import (
 from livekit.agents.llm import (
     LLMCapabilities,
     ToolChoice,
-    _create_ai_function_info, ChoiceDelta, FunctionToolCall
+    _create_ai_function_info
 )
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions
 
 import openai
 from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
-from openai.types.chat.chat_completion_chunk import Choice
+from openai.types.chat.chat_completion_chunk import (
+    Choice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction
+)
 
 from ._oai_api import build_oai_function_description
 from .log import logger
@@ -69,6 +74,11 @@ class LLMOptions:
     store: bool | None = None
     metadata: dict[str, str] | None = None
     max_tokens: int | None = None
+
+@dataclass
+class ParsedFunction:
+    name: str
+    arguments: str
 
 
 class LLM(llm.LLM):
@@ -809,12 +819,15 @@ class LLMStream(llm.LLMStream):
                             index=0,
                             delta=ChoiceDelta(
                                 tool_calls=[
-                                    FunctionToolCall(
-                                        arguments=res[1],
-                                        name=res[0],
-                                        call_id="txt-fnc-" + str(time.time()),
+                                    ChoiceDeltaToolCall(
+                                        index=0,
+                                        id=f"fnc-call-{time.time()}",
+                                        function=ChoiceDeltaToolCallFunction(
+                                            name=res.name,
+                                            arguments=res.arguments,
+                                        )
                                     )
-                                ]
+                                ],
                             )
                         ))
 
@@ -836,7 +849,6 @@ class LLMStream(llm.LLMStream):
 
     def _parse_choice(self, id: str, choice: Choice, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
-        choice.delta.tool_calls
 
         # https://github.com/livekit/agents/issues/688
         # the delta can be None when using Azure OpenAI using content filtering
@@ -948,7 +960,7 @@ def _get_api_key(env_var: str, key: str | None) -> str:
         )
     return key
 
-def _get_arguments_from_text_fnc_call(text: str) -> tuple[str, str] | None:
+def _get_arguments_from_text_fnc_call(text: str) -> ParsedFunction | None:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1:
@@ -965,6 +977,9 @@ def _get_arguments_from_text_fnc_call(text: str) -> tuple[str, str] | None:
 
     try:
         json.loads(args_str) # just validate the json
-        return function_name, args_str
+        return ParsedFunction(
+            name=function_name,
+            arguments=args_str
+        )
     except json.JSONDecodeError:
         return None
