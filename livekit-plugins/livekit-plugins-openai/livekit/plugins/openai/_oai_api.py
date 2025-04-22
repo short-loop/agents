@@ -73,8 +73,8 @@ def build_oai_function_description(
     required_properties: list[str] = []
 
     for arg_info in fnc_info.arguments.values():
-        if arg_info.default is inspect.Parameter.empty:
-            required_properties.append(arg_info.name)
+        # in strict mode, all args are required
+        required_properties.append(arg_info.name)
 
         properties_info[arg_info.name] = build_oai_property(arg_info)
 
@@ -83,10 +83,12 @@ def build_oai_function_description(
         "function": {
             "name": fnc_info.name,
             "description": fnc_info.description,
+            "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": properties_info,
                 "required": required_properties,
+                "additionalProperties": False,
             },
         },
     }
