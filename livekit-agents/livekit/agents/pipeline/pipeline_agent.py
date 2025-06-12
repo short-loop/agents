@@ -147,6 +147,7 @@ class _ImplOptions:
     before_tts_cb: BeforeTTSCallback
     plotting: bool
     transcription: AgentTranscriptionOptions
+    agent_speech_interrupt_threshold: int
 
 
 @dataclass(frozen=True)
@@ -213,6 +214,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         loop: asyncio.AbstractEventLoop | None = None,
         # backward compatibility
         will_synthesize_assistant_reply: WillSynthesizeAssistantReply | None = None,
+        agent_speech_interrupt_threshold: int = 3
     ) -> None:
         """
         Create a new VoicePipelineAgent.
@@ -267,6 +269,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             transcription=transcription,
             before_llm_cb=before_llm_cb,
             before_tts_cb=before_tts_cb,
+            agent_speech_interrupt_threshold=agent_speech_interrupt_threshold
         )
         self._plotter = AssistantPlotter(self._loop)
 
@@ -1264,16 +1267,16 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
                     if self._playing_speech_since is not None:
                         time_diff = time.perf_counter() - self._playing_speech_since
                         logger.debug(f"Playout time lapsed :  {time_diff}")
-                        if time_diff <= 3:
-                            logger.debug(f"Dont interrupt as {time_diff} <= 3")
+                        if time_diff <= self._opts.agent_speech_interrupt_threshold:
+                            logger.debug(f"Dont interrupt as {time_diff} <= {self._opts.agent_speech_interrupt_threshold}")
                             return False, True
             elif len(interim_words) > 1:
                 if interim_words[len(interim_words) - 1].lower() not in ExcludedWords:
                     if self._playing_speech_since is not None:
                         time_diff = time.perf_counter() - self._playing_speech_since
                         logger.debug(f"Playout time lapsed :  {time_diff}")
-                        if time_diff <= 3:
-                            logger.info(f"Dont interrupt as {time_diff} <= 3")
+                        if time_diff <= self._opts.agent_speech_interrupt_threshold:
+                            logger.info(f"Dont interrupt as {time_diff} <= {self._opts.agent_speech_interrupt_threshold}")
                             return False, False
                     logger.debug("agent_playout_start is None")
                     return True, False
