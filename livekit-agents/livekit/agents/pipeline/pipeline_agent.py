@@ -148,6 +148,7 @@ class _ImplOptions:
     plotting: bool
     transcription: AgentTranscriptionOptions
     agent_speech_interrupt_threshold: int
+    final_transcript_timeout: float
 
 
 @dataclass(frozen=True)
@@ -214,7 +215,8 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         loop: asyncio.AbstractEventLoop | None = None,
         # backward compatibility
         will_synthesize_assistant_reply: WillSynthesizeAssistantReply | None = None,
-        agent_speech_interrupt_threshold: int = 3
+        agent_speech_interrupt_threshold: int = 3,
+        final_transcript_timeout: float = 1.0,
     ) -> None:
         """
         Create a new VoicePipelineAgent.
@@ -269,7 +271,8 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             transcription=transcription,
             before_llm_cb=before_llm_cb,
             before_tts_cb=before_tts_cb,
-            agent_speech_interrupt_threshold=agent_speech_interrupt_threshold
+            agent_speech_interrupt_threshold=agent_speech_interrupt_threshold,
+            final_transcript_timeout=final_transcript_timeout,
         )
         self._plotter = AssistantPlotter(self._loop)
 
@@ -318,6 +321,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
             max_endpointing_delay=self._opts.max_endpointing_delay,
             turn_detector=self._turn_detector,
             agent=self,
+            final_transcript_timeout=self._opts.final_transcript_timeout
         )
 
         self._speech_q: list[SpeechHandle] = []
@@ -1299,8 +1303,6 @@ class _DeferredReplyValidation:
     PUNCTUATION = ".!?"
     PUNCTUATION_REDUCE_FACTOR = 0.75
 
-    FINAL_TRANSCRIPT_TIMEOUT = 1
-
     def __init__(
         self,
         validate_fnc: Callable[[], None],
@@ -1308,6 +1310,7 @@ class _DeferredReplyValidation:
         max_endpointing_delay: float,
         turn_detector: _TurnDetector | None,
         agent: VoicePipelineAgent,
+        final_transcript_timeout: float
     ) -> None:
         self._turn_detector = turn_detector
         self._validate_fnc = validate_fnc
@@ -1318,6 +1321,7 @@ class _DeferredReplyValidation:
         self._last_recv_end_of_speech_time: float = 0.0
         self._last_recv_transcript_time: float = 0.0
         self._speaking = False
+        self.final_transcript_timeout = final_transcript_timeout
 
         self._agent = agent
         self._end_of_speech_delay = min_endpointing_delay
@@ -1341,7 +1345,7 @@ class _DeferredReplyValidation:
         # in this case, the agent will not have final transcript, so it'll trigger the user input with empty
         if not self._last_final_transcript:
             logger.info("is_final not received, returning FINAL_TRANSCRIPT_TIMEOUT")
-            return self.FINAL_TRANSCRIPT_TIMEOUT
+            return self.final_transcript_timeout
 
         delay = self._end_of_speech_delay
         if self._end_with_punctuation():
