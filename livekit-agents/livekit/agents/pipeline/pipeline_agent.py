@@ -624,6 +624,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         def _on_interim_transcript(ev: stt.SpeechEvent) -> None:
             logger.info(f"interim_text {ev.alternatives[0].text}")
             self._transcribed_interim_text = ev.alternatives[0].text
+            self._deferred_validation.on_human_interim_transcript(self._transcribed_interim_text)
 
         def _on_final_transcript(ev: stt.SpeechEvent) -> None:
             new_transcript = ev.alternatives[0].text
@@ -1316,6 +1317,7 @@ class _DeferredReplyValidation:
         self._validate_fnc = validate_fnc
         self._validating_task: asyncio.Task | None = None
         self._last_final_transcript: str = ""
+        self._interim_transcripts: list[str] = []
         self._last_language: str | None = None
         self._last_recv_start_of_speech_time: float = 0.0
         self._last_recv_end_of_speech_time: float = 0.0
@@ -1344,8 +1346,14 @@ class _DeferredReplyValidation:
         # to prevent the agent from getting "stuck"
         # in this case, the agent will not have final transcript, so it'll trigger the user input with empty
         if not self._last_final_transcript:
-            logger.info("is_final not received, returning FINAL_TRANSCRIPT_TIMEOUT")
-            return self.final_transcript_timeout
+            if self._interim_transcripts is not None and len(self._interim_transcripts) > 0:
+                interim_text = " ".join(self._interim_transcripts)
+                logger.info(f"is_final not received but have received valid interim: {interim_text}, returning FINAL_TRANSCRIPT_TIMEOUT")
+                return self.final_transcript_timeout
+            else:
+                logger.info(f"This could be noise, returning 1.5*FINAL_TRANSCRIPT_TIMEOUT")
+                return 1.5 * self.final_transcript_timeout
+
 
         delay = self._end_of_speech_delay
         if self._end_with_punctuation():
@@ -1369,6 +1377,10 @@ class _DeferredReplyValidation:
         if delay > 1:
             logger.info(f"delay is greater than 1 {delay}")
         return delay
+
+    def on_human_interim_transcript(self, transcript: str) -> None:
+        if transcript is not None and transcript.strip() != "":
+            self._interim_transcripts.append(transcript.strip())
 
     def on_human_final_transcript(self, transcript: str, language: str | None) -> None:
         self._last_final_transcript += " " + transcript.strip()  # type: ignore
@@ -1406,6 +1418,7 @@ class _DeferredReplyValidation:
 
     def _reset_states(self) -> None:
         self._last_final_transcript = ""
+        self._interim_transcripts = []
         self._last_recv_end_of_speech_time = 0.0
         self._last_recv_transcript_time = 0.0
 
