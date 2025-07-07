@@ -147,7 +147,7 @@ class _ImplOptions:
     before_tts_cb: BeforeTTSCallback
     plotting: bool
     transcription: AgentTranscriptionOptions
-    agent_speech_interrupt_threshold: int
+    agent_speech_interrupt_threshold: float
     final_transcript_timeout: float
 
 
@@ -215,7 +215,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         loop: asyncio.AbstractEventLoop | None = None,
         # backward compatibility
         will_synthesize_assistant_reply: WillSynthesizeAssistantReply | None = None,
-        agent_speech_interrupt_threshold: int = 3,
+        agent_speech_interrupt_threshold: float = 3.0,
         final_transcript_timeout: float = 1.0,
     ) -> None:
         """
