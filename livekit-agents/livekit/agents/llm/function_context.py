@@ -65,6 +65,7 @@ class FunctionInfo:
     auto_retry: bool
     callable: Callable
     arguments: dict[str, FunctionArgInfo]
+    raw_openai_schema: dict[str, any] | None = None
 
 
 @dataclass(frozen=True)
