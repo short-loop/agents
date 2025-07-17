@@ -854,7 +854,7 @@ class LLMStream(llm.LLMStream):
         # https://github.com/livekit/agents/issues/688
         # the delta can be None when using Azure OpenAI using content filtering
         if delta is None:
-            return None
+            return None, None
 
         if delta.tool_calls:
             # check if we have functions to calls
@@ -875,7 +875,7 @@ class LLMStream(llm.LLMStream):
                     self._fnc_raw_arguments += tool.function.arguments  # type: ignore
 
                 if call_chunk is not None:
-                    return call_chunk
+                    return call_chunk, None
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
             # we're done with the tool calls, run the last one
