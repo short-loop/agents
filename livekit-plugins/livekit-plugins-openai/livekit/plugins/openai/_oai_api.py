@@ -35,6 +35,8 @@ def build_oai_function_description(
                 return "number"
             elif t is bool:
                 return "boolean"
+            elif t is dict:
+                return "object"
 
             raise ValueError(f"unsupported type {t} for ai_property")
 

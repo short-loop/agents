@@ -268,7 +268,7 @@ def _set_metadata(
 
 
 def is_type_supported(t: type) -> bool:
-    if t in (str, int, float, bool):
+    if t in (str, int, float, bool, dict):
         return True
 
     if typing.get_origin(t) is list:
