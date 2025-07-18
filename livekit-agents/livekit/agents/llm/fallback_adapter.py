@@ -32,7 +32,12 @@ class AvailabilityChangedEvent:
 
 
 class FallbackAdapter(
-    LLM[Literal["llm_availability_changed"]],
+    LLM[
+        Union[
+            Literal["llm_availability_changed"],
+            Literal["llm_incoming_function_call"],
+        ]
+    ],
 ):
     def __init__(
         self,
@@ -66,6 +71,15 @@ class FallbackAdapter(
             for _ in self._llm_instances
         ]
 
+        for llm in self._llm_instances:
+            llm.on("llm_function_call_incoming", self._on_llm_function_call_incoming)
+
+    def _on_llm_function_call_incoming(self, *args):
+        self.emit(
+            "llm_function_call_incoming",
+            *args,
+        )
+
     def chat(
         self,
         *,
@@ -75,8 +89,9 @@ class FallbackAdapter(
         temperature: float | None = None,
         n: int | None = 1,
         parallel_tool_calls: bool | None = None,
-        tool_choice: Union[ToolChoice, Literal["auto", "required", "none"]]
-        | None = None,
+        tool_choice: (
+            Union[ToolChoice, Literal["auto", "required", "none"]] | None
+        ) = None,
     ) -> "LLMStream":
         return FallbackLLMStream(
             llm=self,
@@ -101,8 +116,9 @@ class FallbackLLMStream(LLMStream):
         temperature: float | None,
         n: int | None,
         parallel_tool_calls: bool | None,
-        tool_choice: Union[ToolChoice, Literal["auto", "required", "none"]]
-        | None = None,
+        tool_choice: (
+            Union[ToolChoice, Literal["auto", "required", "none"]] | None
+        ) = None,
     ) -> None:
         super().__init__(
             llm, chat_ctx=chat_ctx, fnc_ctx=fnc_ctx, conn_options=conn_options
