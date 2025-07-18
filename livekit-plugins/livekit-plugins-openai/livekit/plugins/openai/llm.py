@@ -879,7 +879,7 @@ class LLMStream(llm.LLMStream):
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
             # we're done with the tool calls, run the last one
-            return self._try_build_function(id, choice)
+            return self._try_build_function(id, choice), None
 
         content = delta.content
 
