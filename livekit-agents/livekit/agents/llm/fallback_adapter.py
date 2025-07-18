@@ -72,11 +72,11 @@ class FallbackAdapter(
         ]
 
         for llm in self._llm_instances:
-            llm.on("llm_function_call_incoming", self._on_llm_function_call_incoming)
+            llm.on("llm_incoming_function_call", self._on_llm_function_call_incoming)
 
     def _on_llm_function_call_incoming(self, *args):
         self.emit(
-            "llm_function_call_incoming",
+            "llm_incoming_function_call",
             *args,
         )
 
