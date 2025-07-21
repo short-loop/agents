@@ -499,7 +499,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         new_handle.initialize(source=source, synthesis_handle=synthesis_handle)
 
         if immediate:
-            await self._play_speech(new_handle)
+            await self._play_speech(new_handle, immediate)
         elif self._playing_speech and not self._playing_speech.nested_speech_done:
             self._playing_speech.add_nested_speech(new_handle)
         elif self._speech_q:
@@ -812,7 +812,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         finally:
             SpeechDataContextVar.reset(tk)
 
-    async def _play_speech(self, speech_handle: SpeechHandle) -> None:
+    async def _play_speech(self, speech_handle: SpeechHandle, immediate: bool = False) -> None:
         await self._agent_publication.wait_for_subscription()
 
         fnc_done_fut = asyncio.Future[None]()
@@ -879,7 +879,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
 
         user_question = speech_handle.user_question
 
-        play_handle = synthesis_handle.play()
+        play_handle = synthesis_handle.play(immediate)
         join_fut = play_handle.join()
 
         def _commit_user_question_if_needed() -> None:

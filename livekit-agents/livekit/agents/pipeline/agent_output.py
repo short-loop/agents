@@ -64,13 +64,13 @@ class SynthesisHandle:
     def play_handle(self) -> PlayoutHandle | None:
         return self._play_handle
 
-    def play(self) -> PlayoutHandle:
+    def play(self, immediate: bool = False) -> PlayoutHandle:
         """Validate the speech for playout"""
         if self.interrupted:
             raise RuntimeError("synthesis was interrupted")
 
         self._play_handle = self._agent_playout.play(
-            self._speech_id, self._buf_ch, transcription_fwd=self._tr_fwd
+            self._speech_id, self._buf_ch, transcription_fwd=self._tr_fwd, immediate=immediate
         )
         return self._play_handle
 
