@@ -457,6 +457,7 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         *,
         allow_interruptions: bool = True,
         add_to_chat_ctx: bool = True,
+        immediate: bool = False,
     ) -> SpeechHandle:
         """
         Play a speech source through the voice assistant.
@@ -497,7 +498,9 @@ class VoicePipelineAgent(utils.EventEmitter[EventTypes]):
         synthesis_handle = self._synthesize_agent_speech(new_handle.id, source)
         new_handle.initialize(source=source, synthesis_handle=synthesis_handle)
 
-        if self._playing_speech and not self._playing_speech.nested_speech_done:
+        if immediate:
+            await self._play_speech(new_handle)
+        elif self._playing_speech and not self._playing_speech.nested_speech_done:
             self._playing_speech.add_nested_speech(new_handle)
         elif self._speech_q:
             self._speech_q[0].add_nested_speech(new_handle)
