@@ -97,6 +97,7 @@ class AgentPlayout(utils.EventEmitter[EventTypes]):
         speech_id: str,
         playout_source: AsyncIterable[rtc.AudioFrame],
         transcription_fwd: transcription.TTSSegmentsForwarder,
+        immediate: bool = False,
     ) -> PlayoutHandle:
         if self._closed:
             raise ValueError("cancellable source is closed")
@@ -108,16 +109,16 @@ class AgentPlayout(utils.EventEmitter[EventTypes]):
             transcription_fwd=transcription_fwd,
         )
         self._playout_atask = asyncio.create_task(
-            self._playout_task(self._playout_atask, handle)
+            self._playout_task(self._playout_atask, handle, immediate)
         )
 
         return handle
 
     @utils.log_exceptions(logger=logger)
     async def _playout_task(
-        self, old_task: asyncio.Task[None] | None, handle: PlayoutHandle
+        self, old_task: asyncio.Task[None] | None, handle: PlayoutHandle, immediate: bool = False
     ) -> None:
-        if old_task is not None:
+        if old_task is not None and immediate is False:
             await utils.aio.gracefully_cancel(old_task)
 
         if self._audio_source.queued_duration > 0:

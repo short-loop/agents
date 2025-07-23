@@ -65,6 +65,7 @@ class FunctionInfo:
     auto_retry: bool
     callable: Callable
     arguments: dict[str, FunctionArgInfo]
+    raw_openai_schema: dict[str, any] | None = None
 
 
 @dataclass(frozen=True)
@@ -107,9 +108,10 @@ def ai_callable(
     name: str | None = None,
     description: str | _UseDocMarker = USE_DOCSTRING,
     auto_retry: bool = False,
+    raw_openai_schema: dict[str, any] | None = None
 ) -> Callable:
     def deco(f):
-        _set_metadata(f, name=name, desc=description, auto_retry=auto_retry)
+        _set_metadata(f, name=name, desc=description, auto_retry=auto_retry, raw_openai_schema=raw_openai_schema)
         return f
 
     return deco
@@ -194,6 +196,7 @@ class FunctionContext:
             name=metadata.name,
             description=metadata.description,
             auto_retry=metadata.auto_retry,
+            raw_openai_schema=metadata.raw_openai_schema,
             callable=fnc,
             arguments=args,
         )
@@ -208,6 +211,7 @@ class _AIFncMetadata:
     name: str
     description: str
     auto_retry: bool
+    raw_openai_schema: dict[str, any] | None
 
 
 def _extract_types(annotation: type) -> tuple[type, TypeInfo | None]:
@@ -245,6 +249,7 @@ def _set_metadata(
     name: str | None = None,
     desc: str | _UseDocMarker = USE_DOCSTRING,
     auto_retry: bool = False,
+    raw_openai_schema: dict[str, any] | None = None
 ) -> None:
     if isinstance(desc, _UseDocMarker):
         docstring = inspect.getdoc(f)
@@ -256,14 +261,14 @@ def _set_metadata(
         desc = docstring
 
     metadata = _AIFncMetadata(
-        name=name or f.__name__, description=desc, auto_retry=auto_retry
+        name=name or f.__name__, description=desc, auto_retry=auto_retry, raw_openai_schema=raw_openai_schema
     )
 
     setattr(f, METADATA_ATTR, metadata)
 
 
 def is_type_supported(t: type) -> bool:
-    if t in (str, int, float, bool):
+    if t in (str, int, float, bool, dict):
         return True
 
     if typing.get_origin(t) is list:

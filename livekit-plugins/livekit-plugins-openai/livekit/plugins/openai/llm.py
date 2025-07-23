@@ -80,8 +80,13 @@ class ParsedFunction:
     name: str
     arguments: str
 
+@dataclass
+class IncomingFunctionCallEvent:
+    llm: LLM
+    tool_id: str
+    function_name: str
 
-class LLM(llm.LLM):
+class LLM(llm.LLM[Literal["llm_incoming_function_call"]]):
     def __init__(
         self,
         *,
@@ -854,7 +859,7 @@ class LLMStream(llm.LLMStream):
         # https://github.com/livekit/agents/issues/688
         # the delta can be None when using Azure OpenAI using content filtering
         if delta is None:
-            return None
+            return None, None
 
         if delta.tool_calls:
             # check if we have functions to calls
@@ -871,15 +876,20 @@ class LLMStream(llm.LLMStream):
                     self._tool_call_id = tool.id
                     self._fnc_name = tool.function.name
                     self._fnc_raw_arguments = tool.function.arguments or ""
+                    self._llm.emit("llm_incoming_function_call", IncomingFunctionCallEvent(
+                        llm=self._llm,
+                        tool_id=tool.id,
+                        function_name=tool.function.name,
+                    ))
                 elif tool.function.arguments:
                     self._fnc_raw_arguments += tool.function.arguments  # type: ignore
 
                 if call_chunk is not None:
-                    return call_chunk
+                    return call_chunk, None
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
             # we're done with the tool calls, run the last one
-            return self._try_build_function(id, choice)
+            return self._try_build_function(id, choice), None
 
         content = delta.content
 
@@ -895,6 +905,9 @@ class LLMStream(llm.LLMStream):
                 content = content[0:res]
                 discarded = discarded or "" + original_content[res:]
                 logger.debug(f"discarding content: {discarded}")
+
+        if content is None or len(content) == 0:
+            return None, discarded
 
         return llm.ChatChunk(
             request_id=id,

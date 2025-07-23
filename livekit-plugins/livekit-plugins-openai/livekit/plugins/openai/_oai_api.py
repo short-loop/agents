@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import inspect
 import typing
 from typing import Any
 
@@ -25,8 +24,8 @@ __all__ = ["build_oai_function_description"]
 
 
 def build_oai_function_description(
-    fnc_info: function_context.FunctionInfo,
-    capabilities: llm.LLMCapabilities | None = None,
+        fnc_info: function_context.FunctionInfo,
+        capabilities: llm.LLMCapabilities | None = None,
 ) -> dict[str, Any]:
     def build_oai_property(arg_info: function_context.FunctionArgInfo):
         def type2str(t: type) -> str:
@@ -36,6 +35,8 @@ def build_oai_function_description(
                 return "number"
             elif t is bool:
                 return "boolean"
+            elif t is dict:
+                return "object"
 
             raise ValueError(f"unsupported type {t} for ai_property")
 
@@ -59,15 +60,21 @@ def build_oai_function_description(
             if arg_info.choices:
                 p["enum"] = arg_info.choices
                 if (
-                    inner_th is int
-                    and capabilities
-                    and not capabilities.supports_choices_on_int
+                        inner_th is int
+                        and capabilities
+                        and not capabilities.supports_choices_on_int
                 ):
                     raise ValueError(
                         f"Parameter '{arg_info.name}' uses 'choices' with 'int', which is not supported by this model."
                     )
 
         return p
+
+    if fnc_info.raw_openai_schema:
+        return {
+            "type": "function",
+            "function": fnc_info.raw_openai_schema,
+        }
 
     properties_info: dict[str, dict[str, Any]] = {}
     required_properties: list[str] = []
