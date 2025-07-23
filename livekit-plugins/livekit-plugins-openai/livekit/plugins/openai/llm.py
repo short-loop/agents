@@ -703,7 +703,7 @@ class LLMStream(llm.LLMStream):
                 usage = first_chunk.usage
                 self._event_ch.send_nowait(
                     llm.ChatChunk(
-                        request_id=first_chunk.id,
+                        id=first_chunk.id,
                         usage=llm.CompletionUsage(
                             completion_tokens=usage.completion_tokens,
                             prompt_tokens=usage.prompt_tokens,
@@ -728,7 +728,7 @@ class LLMStream(llm.LLMStream):
                         usage = chunk.usage
                         self._event_ch.send_nowait(
                             llm.ChatChunk(
-                                request_id=chunk.id,
+                                id=chunk.id,
                                 usage=llm.CompletionUsage(
                                     completion_tokens=usage.completion_tokens,
                                     prompt_tokens=usage.prompt_tokens,
@@ -826,11 +826,6 @@ class LLMStream(llm.LLMStream):
                 logger.debug(f"discarding content: {discarded}")
 
         return llm.ChatChunk(
-            request_id=id,
-            choices=[
-                llm.Choice(
-                    delta=llm.ChoiceDelta(content=content, role="assistant"),
-                    index=choice.index,
-                )
-            ],
+            id=id,
+            delta=llm.ChoiceDelta(content=content, role="assistant")
         ), discarded
