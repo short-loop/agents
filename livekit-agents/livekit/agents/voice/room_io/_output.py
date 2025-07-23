@@ -15,6 +15,7 @@ from ...types import (
 )
 from .. import io
 from ..transcription import find_micro_track_id
+import numpy as np
 
 
 class _ParticipantAudioOutput(io.AudioOutput):
@@ -24,6 +25,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
         *,
         sample_rate: int,
         num_channels: int,
+        max_volume: float,
         track_publish_options: rtc.TrackPublishOptions,
         queue_size_ms: int = 100_000,  # TODO(long): move buffer to python
     ) -> None:
@@ -42,6 +44,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
 
         self._pushed_duration: float = 0.0
         self._interrupted: bool = False
+        self.max_volume: float = max_volume
 
     async def _publish_track(self) -> None:
         async with self._lock:
@@ -80,7 +83,8 @@ class _ParticipantAudioOutput(io.AudioOutput):
             await self._flush_task
 
         self._pushed_duration += frame.duration
-        await self._audio_source.capture_frame(frame)
+        v_frame = self._set_volume_for_chunk(frame, self.max_volume)
+        await self._audio_source.capture_frame(v_frame)
 
     def flush(self) -> None:
         super().flush()
@@ -99,6 +103,20 @@ class _ParticipantAudioOutput(io.AudioOutput):
         if not self._pushed_duration:
             return
         self._interrupted_event.set()
+
+    def _set_volume_for_chunk(self, frame: rtc.AudioFrame, volume: float) -> rtc.AudioFrame:
+        if volume == 1.0:
+            return frame
+
+        data = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32)
+        data *= 10 ** (np.log10(volume))
+        data = np.clip(data, -32768, 32767).astype(np.int16)
+        return rtc.AudioFrame(
+            data=data.tobytes(),
+            num_channels=frame.num_channels,
+            samples_per_channel=frame.samples_per_channel,
+            sample_rate=frame.sample_rate
+        )
 
     async def _wait_for_playout(self) -> None:
         wait_for_interruption = asyncio.create_task(self._interrupted_event.wait())

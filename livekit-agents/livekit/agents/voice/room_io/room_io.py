@@ -97,6 +97,7 @@ class RoomOutputOptions:
     """If not given, default to True."""
     audio_sample_rate: int = 24000
     audio_num_channels: int = 1
+    max_volume: float = 1.0
     audio_publish_options: rtc.TrackPublishOptions = field(
         default_factory=lambda: rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
     )
@@ -191,6 +192,7 @@ class RoomIO:
                 self._room,
                 sample_rate=self._output_options.audio_sample_rate,
                 num_channels=self._output_options.audio_num_channels,
+                max_volume=self._output_options.max_volume,
                 track_publish_options=self._output_options.audio_publish_options,
             )
 

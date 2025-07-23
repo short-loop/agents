@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -621,6 +622,38 @@ class LLMStream(llm.LLMStream):
         self._llm = llm
         self._extra_kwargs = extra_kwargs
 
+    async def _stream_with_first_chunk(self, stream_id, messages, fnc_ctx):
+        start = time.time()
+        stream = await self._client.chat.completions.create(
+            messages=messages,
+            model=self._model,
+            tools = fnc_ctx,
+            stream_options = {"include_usage": True},
+            stream = True,
+            timeout = httpx.Timeout(self._conn_options.timeout),
+            ** self._extra_kwargs
+        )
+        iterator = stream.__aiter__()
+        first_chunk = await iterator.__anext__()
+        logger.debug(f"stream {stream_id} with ttfb {time.time() - start}")
+        return stream_id, stream, iterator, first_chunk
+
+    async def _parallel_inference(self, messages, fnc_ctx):
+        task1 = asyncio.create_task(self._stream_with_first_chunk(1, messages, fnc_ctx))
+        task2 = asyncio.create_task(self._stream_with_first_chunk(2, messages, fnc_ctx))
+
+        done, pending = await asyncio.wait(
+            [task1, task2],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        fastest = done.pop().result()
+
+        for task in pending:
+            task.cancel()
+
+        return fastest
+
+
     async def _run(self) -> None:
         # current function call that we're waiting for full completion (args are streamed)
         # (defined inside the _run method to make sure the state is reset for each run/attempt)
@@ -645,39 +678,64 @@ class LLMStream(llm.LLMStream):
                     },
                 )
 
-            self._oai_stream = stream = await self._client.chat.completions.create(
-                messages=cast(list[ChatCompletionMessageParam], chat_ctx),
-                tools=fnc_ctx,
-                model=self._model,
-                stream_options={"include_usage": True},
-                stream=True,
-                timeout=httpx.Timeout(self._conn_options.timeout),
-                **self._extra_kwargs,
-            )
-
             thinking = asyncio.Event()
+            logger.info("starting parallel inference")
+            start_inference = time.time()
+            stream_id, stream, iterator, first_chunk = await self._parallel_inference(cast(list[ChatCompletionMessageParam], chat_ctx), fnc_ctx)
+            logger.debug(f"using llm stream {stream_id}")
+
+            discarded_buffer: str = ""
+            discard_flag = False
+
+            # for first chunk
+            for choice in first_chunk.choices:
+                chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice)
+                if discarded_str is not None and len(discarded_str.strip()) > 0:
+                    discard_flag = True
+                    discarded_buffer = discarded_buffer + discarded_str
+                logger.info(f"sending first chunk by {time.time() - start_inference}")
+                if chat_chunk is not None:
+                    retryable = False
+                    logger.info(f"sending first chunk {chat_chunk} by {time.time() - start_inference}")
+                    self._event_ch.send_nowait(chat_chunk)
+
+            if first_chunk.usage is not None:
+                usage = first_chunk.usage
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(
+                        request_id=first_chunk.id,
+                        usage=llm.CompletionUsage(
+                            completion_tokens=usage.completion_tokens,
+                            prompt_tokens=usage.prompt_tokens,
+                            total_tokens=usage.total_tokens,
+                        ),
+                    )
+                )
+
             async with stream:
                 async for chunk in stream:
                     for choice in chunk.choices:
-                        chat_chunk = self._parse_choice(chunk.id, choice, thinking)
+                        chat_chunk, discarded_str = self._parse_choice(chunk.id, choice, discard_flag)
+                        if discarded_str is not None:
+                            discard_flag = True
+                            discarded_buffer = discarded_buffer + discarded_str
+
                         if chat_chunk is not None:
                             retryable = False
                             self._event_ch.send_nowait(chat_chunk)
 
                     if chunk.usage is not None:
-                        retryable = False
-                        tokens_details = chunk.usage.prompt_tokens_details
-                        cached_tokens = tokens_details.cached_tokens if tokens_details else 0
-                        chunk = llm.ChatChunk(
-                            id=chunk.id,
-                            usage=llm.CompletionUsage(
-                                completion_tokens=chunk.usage.completion_tokens,
-                                prompt_tokens=chunk.usage.prompt_tokens,
-                                prompt_cached_tokens=cached_tokens or 0,
-                                total_tokens=chunk.usage.total_tokens,
-                            ),
+                        usage = chunk.usage
+                        self._event_ch.send_nowait(
+                            llm.ChatChunk(
+                                request_id=chunk.id,
+                                usage=llm.CompletionUsage(
+                                    completion_tokens=usage.completion_tokens,
+                                    prompt_tokens=usage.prompt_tokens,
+                                    total_tokens=usage.total_tokens,
+                                ),
+                            )
                         )
-                        self._event_ch.send_nowait(chunk)
 
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable) from None
@@ -692,9 +750,7 @@ class LLMStream(llm.LLMStream):
         except Exception as e:
             raise APIConnectionError(retryable=retryable) from e
 
-    def _parse_choice(
-        self, id: str, choice: Choice, thinking: asyncio.Event
-    ) -> llm.ChatChunk | None:
+    def _parse_choice(self, id: str, choice: Choice, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
 
         # https://github.com/livekit/agents/issues/688
@@ -754,12 +810,27 @@ class LLMStream(llm.LLMStream):
             self._tool_call_id = self._fnc_name = self._fnc_raw_arguments = None
             return call_chunk
 
-        delta.content = llm_utils.strip_thinking_tokens(delta.content, thinking)
+        content = delta.content
 
-        if not delta.content:
-            return None
+        if discard:
+            logger.debug(f"discarding content: {delta.content}")
+            return None, delta.content
+
+        discarded: str | None = None
+        if delta.content is not None:
+            original_content = content  # Preserve the original value of content
+            res = content.find('[')
+            if res != -1:
+                content = content[0:res]
+                discarded = discarded or "" + original_content[res:]
+                logger.debug(f"discarding content: {discarded}")
 
         return llm.ChatChunk(
-            id=id,
-            delta=llm.ChoiceDelta(content=delta.content, role="assistant"),
-        )
+            request_id=id,
+            choices=[
+                llm.Choice(
+                    delta=llm.ChoiceDelta(content=content, role="assistant"),
+                    index=choice.index,
+                )
+            ],
+        ), discarded
