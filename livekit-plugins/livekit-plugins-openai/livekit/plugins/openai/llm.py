@@ -715,7 +715,7 @@ class LLMStream(llm.LLMStream):
             async with stream:
                 async for chunk in stream:
                     for choice in chunk.choices:
-                        chat_chunk, discarded_str = self._parse_choice(chunk.id, choice, discard_flag)
+                        chat_chunk, discarded_str = self._parse_choice(chunk.id, choice, thinking, discard_flag)
                         if discarded_str is not None:
                             discard_flag = True
                             discarded_buffer = discarded_buffer + discarded_str
@@ -725,17 +725,19 @@ class LLMStream(llm.LLMStream):
                             self._event_ch.send_nowait(chat_chunk)
 
                     if chunk.usage is not None:
-                        usage = chunk.usage
-                        self._event_ch.send_nowait(
-                            llm.ChatChunk(
-                                id=chunk.id,
-                                usage=llm.CompletionUsage(
-                                    completion_tokens=usage.completion_tokens,
-                                    prompt_tokens=usage.prompt_tokens,
-                                    total_tokens=usage.total_tokens,
-                                ),
-                            )
+                        retryable = False
+                        tokens_details = chunk.usage.prompt_tokens_details
+                        cached_tokens = tokens_details.cached_tokens if tokens_details else 0
+                        chunk = llm.ChatChunk(
+                            id=chunk.id,
+                            usage=llm.CompletionUsage(
+                                completion_tokens=chunk.usage.completion_tokens,
+                                prompt_tokens=chunk.usage.prompt_tokens,
+                                prompt_cached_tokens=cached_tokens or 0,
+                                total_tokens=chunk.usage.total_tokens,
+                            ),
                         )
+                        self._event_ch.send_nowait(chunk)
 
         except openai.APITimeoutError:
             raise APITimeoutError(retryable=retryable) from None
@@ -750,13 +752,14 @@ class LLMStream(llm.LLMStream):
         except Exception as e:
             raise APIConnectionError(retryable=retryable) from e
 
-    def _parse_choice(self, id: str, choice: Choice, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
+    def _parse_choice(
+        self, id: str, choice: Choice, thinking: asyncio.Event, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
 
         # https://github.com/livekit/agents/issues/688
         # the delta can be None when using Azure OpenAI (content filtering)
         if delta is None:
-            return None
+            return None, None
 
         if delta.tool_calls:
             for tool in delta.tool_calls:
@@ -808,9 +811,9 @@ class LLMStream(llm.LLMStream):
                 ),
             )
             self._tool_call_id = self._fnc_name = self._fnc_raw_arguments = None
-            return call_chunk
+            return call_chunk, None
 
-        content = delta.content
+        content = llm_utils.strip_thinking_tokens(delta.content, thinking)
 
         if discard:
             logger.debug(f"discarding content: {delta.content}")
