@@ -349,43 +349,44 @@ class AudioRecognition:
         async def _bounce_eou_task(last_speaking_time: float) -> None:
             endpointing_delay = self._min_endpointing_delay
             user_turn_span = self._ensure_user_turn_span()
-            if turn_detector is not None:
+            if self._hooks.is_bot_interrupted():
+                logger.debug("Recent Interrupt, backing off")
+                endpointing_delay = self._interrupt_backoff
+
+            elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.debug("Turn detector does not support language %s", self._last_language)
                 else:
-                    if self._hooks.is_bot_interrupted():
-                        logger.debug("Recent Interrupt, backing off")
-                        endpointing_delay = self._interrupt_backoff
-                    else:
-                        with (
-                            trace.use_span(user_turn_span),
-                            tracer.start_as_current_span("eou_detection") as eou_detection_span,
+                    with (
+                        trace.use_span(user_turn_span),
+                        tracer.start_as_current_span("eou_detection") as eou_detection_span,
+                    ):
+                        end_of_turn_probability = await turn_detector.predict_end_of_turn(chat_ctx)
+                        unlikely_threshold = await turn_detector.unlikely_threshold(
+                            self._last_language
+                        )
+                        if (
+                                unlikely_threshold is not None
+                                and end_of_turn_probability < unlikely_threshold
                         ):
-                            end_of_turn_probability = await turn_detector.predict_end_of_turn(chat_ctx)
-                            unlikely_threshold = await turn_detector.unlikely_threshold(
-                                self._last_language
-                            )
-                            if (
-                                    unlikely_threshold is not None
-                                    and end_of_turn_probability < unlikely_threshold
-                            ):
-                                endpointing_delay = self._max_endpointing_delay
+                            endpointing_delay = self._max_endpointing_delay
 
-                            eou_detection_span.set_attributes(
-                                {
-                                    trace_types.ATTR_CHAT_CTX: json.dumps(
-                                        chat_ctx.to_dict(
-                                            exclude_audio=True,
-                                            exclude_image=True,
-                                            exclude_timestamp=False,
-                                        )
-                                    ),
-                                    trace_types.ATTR_EOU_PROBABILITY: end_of_turn_probability,
-                                    trace_types.ATTR_EOU_UNLIKELY_THRESHOLD: unlikely_threshold or 0,
-                                    trace_types.ATTR_EOU_DELAY: endpointing_delay,
-                                    trace_types.ATTR_EOU_LANGUAGE: self._last_language or "",
-                                }
-                            )
+                        eou_detection_span.set_attributes(
+                            {
+                                trace_types.ATTR_CHAT_CTX: json.dumps(
+                                    chat_ctx.to_dict(
+                                        exclude_audio=True,
+                                        exclude_image=True,
+                                        exclude_timestamp=False,
+                                    )
+                                ),
+                                trace_types.ATTR_EOU_PROBABILITY: end_of_turn_probability,
+                                trace_types.ATTR_EOU_UNLIKELY_THRESHOLD: unlikely_threshold or 0,
+                                trace_types.ATTR_EOU_DELAY: endpointing_delay,
+                                trace_types.ATTR_EOU_LANGUAGE: self._last_language or "",
+                            }
+                        )
+
 
             logger.debug("endpointing_delay: %s", endpointing_delay)
             extra_sleep = last_speaking_time + endpointing_delay - time.time()
