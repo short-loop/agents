@@ -58,6 +58,11 @@ from .utils import AsyncAzureADTokenProvider, to_fnc_ctx
 
 lk_oai_debug = int(os.getenv("LK_OPENAI_DEBUG", 0))
 
+@dataclass
+class IncomingFunctionCallEvent:
+    llm: LLM
+    tool_id: str
+    function_name: str
 
 @dataclass
 class _LLMOptions:
@@ -789,11 +794,16 @@ class LLMStream(llm.LLMStream):
                     self._tool_call_id = tool.id
                     self._fnc_name = tool.function.name
                     self._fnc_raw_arguments = tool.function.arguments or ""
+                    self._llm.emit("llm_incoming_function_call", IncomingFunctionCallEvent(
+                        llm=self._llm,
+                        tool_id=tool.id,
+                        function_name=tool.function.name,
+                    ))
                 elif tool.function.arguments:
                     self._fnc_raw_arguments += tool.function.arguments  # type: ignore
 
                 if call_chunk is not None:
-                    return call_chunk
+                    return call_chunk, None
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
             call_chunk = llm.ChatChunk(
@@ -827,6 +837,9 @@ class LLMStream(llm.LLMStream):
                 content = content[0:res]
                 discarded = discarded or "" + original_content[res:]
                 logger.debug(f"discarding content: {discarded}")
+
+        if content is None or len(content) == 0:
+            return None, discarded
 
         return llm.ChatChunk(
             id=id,
