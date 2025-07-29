@@ -56,7 +56,7 @@ class RecognitionHooks(Protocol):
     def on_final_transcript(self, ev: stt.SpeechEvent) -> None: ...
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool: ...
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
-
+    def is_bot_interrupted(self) -> bool: ...
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
 
 
@@ -70,6 +70,7 @@ class AudioRecognition:
         turn_detector: _TurnDetector | None,
         min_endpointing_delay: float,
         max_endpointing_delay: float,
+        interrupt_backoff: float,
         turn_detection_mode: TurnDetectionMode | None,
     ) -> None:
         self._hooks = hooks
@@ -83,6 +84,7 @@ class AudioRecognition:
         self._turn_detector = turn_detector
         self._stt = stt
         self._vad = vad
+        self._interrupt_backoff = interrupt_backoff
         self._turn_detection_mode = turn_detection_mode
         self._vad_base_turn_detection = turn_detection_mode in ("vad", None)
         self._user_turn_committed = False  # true if user turn ended but EOU task not done
@@ -347,7 +349,11 @@ class AudioRecognition:
         async def _bounce_eou_task(last_speaking_time: float) -> None:
             endpointing_delay = self._min_endpointing_delay
             user_turn_span = self._ensure_user_turn_span()
-            if turn_detector is not None:
+            if self._hooks.is_bot_interrupted():
+                logger.debug("Recent Interrupt, backing off")
+                endpointing_delay = self._interrupt_backoff
+
+            elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.debug("Turn detector does not support language %s", self._last_language)
                 else:
@@ -360,8 +366,8 @@ class AudioRecognition:
                             self._last_language
                         )
                         if (
-                            unlikely_threshold is not None
-                            and end_of_turn_probability < unlikely_threshold
+                                unlikely_threshold is not None
+                                and end_of_turn_probability < unlikely_threshold
                         ):
                             endpointing_delay = self._max_endpointing_delay
 
@@ -381,6 +387,8 @@ class AudioRecognition:
                             }
                         )
 
+
+            logger.debug("endpointing_delay: %s", endpointing_delay)
             extra_sleep = last_speaking_time + endpointing_delay - time.time()
             await asyncio.sleep(max(extra_sleep, 0))
 

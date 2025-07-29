@@ -150,6 +150,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         min_interruption_words: int = 0,
         min_endpointing_delay: float = 0.5,
         max_endpointing_delay: float = 6.0,
+        interrupt_backoff: float = 3.0,
         max_tool_steps: int = 3,
         video_sampler: NotGivenOr[_VideoSampler | None] = NOT_GIVEN,
         user_away_timeout: float | None = 15.0,
@@ -300,7 +301,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self._job_context_cb_registered: bool = False
 
         self._global_run_state: RunResult | None = None
-
+        self._interrupt_backoff = interrupt_backoff
         # trace
         self._user_speaking_span: trace.Span | None = None
         self._agent_speaking_span: trace.Span | None = None
