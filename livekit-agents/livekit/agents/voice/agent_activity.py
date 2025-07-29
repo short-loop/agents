@@ -1054,9 +1054,10 @@ class AgentActivity(RecognitionHooks):
                 self._rt_session.interrupt()
 
             self._current_speech.interrupt()
-            history = InterruptionHistory(timestamp = time.time())
-            self._interruption_history.append(history)
-            logger.debug("Interruption history: %s", self._interruption_history)
+            if self._session.agent_state == "speaking":
+                history = InterruptionHistory(timestamp=time.time())
+                self._interruption_history.append(history)
+                logger.debug("Interruption history: %s", self._interruption_history)
 
     def on_interim_transcript(self, ev: stt.SpeechEvent) -> None:
         if isinstance(self.llm, llm.RealtimeModel) and self.llm.capabilities.user_transcription:
