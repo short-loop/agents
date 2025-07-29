@@ -80,6 +80,9 @@ class _PreemptiveGeneration:
     tool_choice: llm.ToolChoice | None
     created_at: float
 
+@dataclass
+class InterruptionHistory:
+    timestamp: float
 
 # NOTE: AgentActivity isn't exposed to the public API
 class AgentActivity(RecognitionHooks):
@@ -95,6 +98,7 @@ class AgentActivity(RecognitionHooks):
         self._scheduling_paused = True
 
         self._current_speech: SpeechHandle | None = None
+        self._interruption_history: list[InterruptionHistory] = []
         self._speech_q: list[tuple[int, float, SpeechHandle]] = []
 
         # fired when a speech_task finishes or when a new speech_handle is scheduled
@@ -106,7 +110,7 @@ class AgentActivity(RecognitionHooks):
         self._speech_tasks: list[asyncio.Task[Any]] = []
 
         self._preemptive_generation: _PreemptiveGeneration | None = None
-
+        self._interrupt_backoff = self._session._interrupt_backoff
         self._turn_detection_mode = (
             self.turn_detection if isinstance(self.turn_detection, str) else None
         )
@@ -481,6 +485,7 @@ class AgentActivity(RecognitionHooks):
             min_endpointing_delay=self._session.options.min_endpointing_delay,
             max_endpointing_delay=self._session.options.max_endpointing_delay,
             turn_detection_mode=self._turn_detection_mode,
+            interrupt_backoff=self._interrupt_backoff,
         )
         self._audio_recognition.start()
 
@@ -788,6 +793,7 @@ class AgentActivity(RecognitionHooks):
             An asyncio.Future that completes when the interruption is fully processed
             and chat context has been updated
         """
+        logger.debug("Interrupting speech generation inside agent activity")
         self._cancel_preemptive_generation()
 
         future = asyncio.Future[None]()
@@ -868,6 +874,7 @@ class AgentActivity(RecognitionHooks):
             await self._q_updated.wait()
             while self._speech_q:
                 _, _, speech = heapq.heappop(self._speech_q)
+                logger.debug("Setting _current_speech to Value 1")
                 self._current_speech = speech
                 if self.min_consecutive_speech_delay > 0.0:
                     await asyncio.sleep(
@@ -875,6 +882,7 @@ class AgentActivity(RecognitionHooks):
                     )
                 speech._authorize_generation()
                 await speech._wait_for_generation()
+                logger.debug("Setting _current_speech to None 1")
                 self._current_speech = None
                 last_playout_ts = time.time()
 
@@ -1046,6 +1054,9 @@ class AgentActivity(RecognitionHooks):
                 self._rt_session.interrupt()
 
             self._current_speech.interrupt()
+            history = InterruptionHistory(timestamp = time.time())
+            self._interruption_history.append(history)
+            logger.debug("Interruption history: %s", self._interruption_history)
 
     def on_interim_transcript(self, ev: stt.SpeechEvent) -> None:
         if isinstance(self.llm, llm.RealtimeModel) and self.llm.capabilities.user_transcription:
@@ -1102,6 +1113,18 @@ class AgentActivity(RecognitionHooks):
             tool_choice=self._tool_choice,
             created_at=time.time(),
         )
+
+    def is_bot_interrupted(self) -> bool:
+        if self._interruption_history:
+            last_entry = self._interruption_history[-1]
+            if time.time() - last_entry.timestamp <= 2:
+                print("Last interruption was within 2 seconds.")
+                return True
+            else:
+                print("Last interruption was more than 2 seconds ago.")
+        else:
+            print("No interruption history.")
+        return False
 
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool:
         # IMPORTANT: This method is sync to avoid it being cancelled by the AudioRecognition
@@ -1562,6 +1585,7 @@ class AgentActivity(RecognitionHooks):
             self._agent._chat_ctx.insert(_tools_messages)
 
         if speech_handle.interrupted:
+            logger.debug("Speech handle interrupted...")
             await utils.aio.cancel_and_wait(*tasks)
             await text_tee.aclose()
 
