@@ -1042,6 +1042,20 @@ class AgentActivity(RecognitionHooks):
             ):
                 return
 
+            ####
+            if self.is_bot_speaking():
+                # Split into words by whitespace
+                words = text.strip().split()
+                if len(words) == 1:
+                    word = words[0]
+                    logger.debug(f"User Speaking: {word}")
+                    logger.debug(f"Excluded: {self._audio_recognition.get_excluded_words()}")
+                    if word.lower() in self._audio_recognition.get_excluded_words():
+                        logger.debug("User side crutch word found, returning", extra={"word": word})
+                        return
+
+            ####
+        logger.debug("Will process remaining on_vad_inference_done 3")
         if self._rt_session is not None:
             self._rt_session.start_user_activity()
 
@@ -1126,6 +1140,9 @@ class AgentActivity(RecognitionHooks):
         else:
             print("No interruption history.")
         return False
+
+    def is_bot_speaking(self) -> bool:
+        return self._session.agent_state == "speaking"
 
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool:
         # IMPORTANT: This method is sync to avoid it being cancelled by the AudioRecognition
