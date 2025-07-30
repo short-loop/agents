@@ -671,7 +671,7 @@ class LLMStream(llm.LLMStream):
 
         try:
             chat_ctx, _ = self._chat_ctx.to_provider_format(format=self._provider_fmt)
-            fnc_ctx = to_fnc_ctx(self._tools) if self._tools else openai.NOT_GIVEN
+            fnc_ctx = to_fnc_ctx(self._tools) if self._tools else []
             if lk_oai_debug:
                 tool_choice = self._extra_kwargs.get("tool_choice", NOT_GIVEN)
                 logger.debug(
