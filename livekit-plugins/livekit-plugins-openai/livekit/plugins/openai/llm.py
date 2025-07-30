@@ -793,7 +793,7 @@ class LLMStream(llm.LLMStream):
                     self._fnc_raw_arguments += tool.function.arguments  # type: ignore
 
                 if call_chunk is not None:
-                    return call_chunk
+                    return call_chunk, None
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
             call_chunk = llm.ChatChunk(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import string
 import time
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
@@ -47,6 +48,16 @@ class _TurnDetector(Protocol):
 
     async def predict_end_of_turn(self, chat_ctx: llm.ChatContext) -> float: ...
 
+ExcludedWords = {
+    "",
+    "hello?", "hello.", "hello", "hello,",
+    "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
+    "yes?", "yes.", "yes", "yes,",
+    "yeah?", "yeah.", "yeah", "yeah,",
+    "ya?", "ya.", "ya", "ya,",
+    "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
+    "sure?", "sure.", "sure", "sure,"
+}
 
 class RecognitionHooks(Protocol):
     def on_start_of_speech(self, ev: vad.VADEvent) -> None: ...
@@ -55,6 +66,7 @@ class RecognitionHooks(Protocol):
     def on_interim_transcript(self, ev: stt.SpeechEvent) -> None: ...
     def on_final_transcript(self, ev: stt.SpeechEvent) -> None: ...
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool: ...
+    def is_bot_speaking(self) -> bool: ...
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def is_bot_interrupted(self) -> bool: ...
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
@@ -260,6 +272,7 @@ class AudioRecognition:
                 extra={"user_transcript": transcript, "language": self._last_language},
             )
 
+
             self._last_final_transcript_time = time.time()
             self._audio_transcript += f" {transcript}"
             self._audio_transcript = self._audio_transcript.lstrip()
@@ -336,6 +349,18 @@ class AudioRecognition:
         if self._stt and not self._audio_transcript and self._turn_detection_mode != "manual":
             # stt enabled but no transcript yet
             return
+
+        if self._hooks.is_bot_speaking():
+            logger.debug("Bot Speaking!!!")
+            # Split into words by whitespace
+            logger.debug("Transcript: " + self.current_transcript)
+            words = self.current_transcript.strip().split()
+            logger.debug(f"words ->: {words}")
+            if len(words) == 1:
+                word = words[0]
+                if word.lower() in self.get_excluded_words():
+                    logger.debug("User side crutch word found, returning", extra={"word": word})
+                    return
 
         chat_ctx = chat_ctx.copy()
         chat_ctx.add_message(role="user", content=self._audio_transcript)
@@ -495,3 +520,15 @@ class AudioRecognition:
 
         self._user_turn_span = tracer.start_span("user_turn")
         return self._user_turn_span
+
+    def get_excluded_words(self) -> set[str]:
+        return {
+            "",
+            "hello?", "hello.", "hello", "hello,",
+            "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
+            "yes?", "yes.", "yes", "yes,",
+            "yeah?", "yeah.", "yeah", "yeah,",
+            "ya?", "ya.", "ya", "ya,",
+            "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
+            "sure?", "sure.", "sure", "sure,"
+        }
