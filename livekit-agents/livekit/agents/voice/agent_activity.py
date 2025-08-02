@@ -1055,7 +1055,6 @@ class AgentActivity(RecognitionHooks):
                         return
 
             ####
-        logger.debug("Will process remaining on_vad_inference_done 3")
         if self._rt_session is not None:
             self._rt_session.start_user_activity()
 
