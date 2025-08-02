@@ -48,16 +48,39 @@ class _TurnDetector(Protocol):
 
     async def predict_end_of_turn(self, chat_ctx: llm.ChatContext) -> float: ...
 
-ExcludedWords = {
-    "",
-    "hello?", "hello.", "hello", "hello,",
-    "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
-    "yes?", "yes.", "yes", "yes,",
-    "yeah?", "yeah.", "yeah", "yeah,",
-    "ya?", "ya.", "ya", "ya,",
-    "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
-    "sure?", "sure.", "sure", "sure,"
-}
+def ends_with_number_like(chat_ctx: llm.ChatContext):
+    try:
+        number_words = {
+            "zero", "one", "two", "three", "four", "five",
+            "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+            "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+            "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+            "hundred", "thousand"
+        }
+        if len(chat_ctx.items) == 0:
+            return False
+        last_element = chat_ctx.items[-1]
+        if last_element.role != "user":
+            return False
+        if last_element.type != "message":
+            return False
+        s = last_element.text_content
+
+        # Remove punctuation at the end
+        s = s.rstrip(".,!?").lower()
+        words = s.split()
+
+        found = False
+        for word in reversed(words):
+            if word.isdigit() or word in number_words:
+                found = True
+            else:
+                break
+        return found
+    except Exception as ex:
+        logger.error(f"Encountered an exception in ends_with_number_like: {ex} {s}")
+        return False
 
 class RecognitionHooks(Protocol):
     def on_start_of_speech(self, ev: vad.VADEvent) -> None: ...
@@ -318,6 +341,7 @@ class AudioRecognition:
 
     async def _on_vad_event(self, ev: vad.VADEvent) -> None:
         if ev.type == vad.VADEventType.START_OF_SPEECH:
+            logger.debug("Start Of Speech detected")
             with trace.use_span(self._ensure_user_turn_span()):
                 self._hooks.on_start_of_speech(ev)
 
@@ -338,6 +362,7 @@ class AudioRecognition:
             self._speaking = False
             # when VAD fires END_OF_SPEECH, it already waited for the silence_duration
             self._last_speaking_time = time.time() - ev.silence_duration
+            logger.debug("_last_speaking_time END_OF_SPEECH", extra={"speech_duration": self._last_speaking_time})
 
             if self._vad_base_turn_detection or (
                 self._turn_detection_mode == "stt" and self._user_turn_committed
@@ -374,10 +399,15 @@ class AudioRecognition:
         async def _bounce_eou_task(last_speaking_time: float) -> None:
             endpointing_delay = self._min_endpointing_delay
             user_turn_span = self._ensure_user_turn_span()
+            extra_sleep = None
             if self._hooks.is_bot_interrupted():
-                logger.debug("Recent Interrupt, backing off")
                 endpointing_delay = self._interrupt_backoff
-
+                logger.debug("Recent Interrupt, backing off, endpointing_delay: %s", endpointing_delay)
+                extra_sleep = last_speaking_time + endpointing_delay - time.time()
+            elif ends_with_number_like(chat_ctx):
+                endpointing_delay = self._max_endpointing_delay
+                logger.debug("Ending with number, endpointing_delay: %s", endpointing_delay)
+                extra_sleep = self._max_endpointing_delay
             elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.debug("Turn detector does not support language %s", self._last_language)
@@ -395,7 +425,8 @@ class AudioRecognition:
                                 and end_of_turn_probability < unlikely_threshold
                         ):
                             endpointing_delay = self._max_endpointing_delay
-
+                            logger.debug("endpointing_delay: %s", endpointing_delay)
+                            extra_sleep = last_speaking_time + endpointing_delay - time.time()
                         eou_detection_span.set_attributes(
                             {
                                 trace_types.ATTR_CHAT_CTX: json.dumps(
@@ -412,9 +443,11 @@ class AudioRecognition:
                             }
                         )
 
-
-            logger.debug("endpointing_delay: %s", endpointing_delay)
-            extra_sleep = last_speaking_time + endpointing_delay - time.time()
+            if extra_sleep is None:
+                logger.debug("endpointing_delay: %s", endpointing_delay)
+                extra_sleep = last_speaking_time + endpointing_delay - time.time()
+            logger.debug("last_speaking_time: %s", last_speaking_time)
+            logger.debug("extra_sleep: %s", extra_sleep)
             await asyncio.sleep(max(extra_sleep, 0))
 
             confidence_avg = (
