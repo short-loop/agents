@@ -128,6 +128,7 @@ class AudioRecognition:
         self._speaking = False
         self._last_speaking_time: float = 0
         self._last_final_transcript_time: float = 0
+        self._second_last_final_transcript_time: float = 0
         self._final_transcript_received = asyncio.Event()
         self._final_transcript_confidence: list[float] = []
         self._audio_transcript = ""
@@ -295,7 +296,7 @@ class AudioRecognition:
                 extra={"user_transcript": transcript, "language": self._last_language},
             )
 
-
+            self._second_last_final_transcript_time = self._last_final_transcript_time
             self._last_final_transcript_time = time.time()
             self._audio_transcript += f" {transcript}"
             self._audio_transcript = self._audio_transcript.lstrip()
@@ -324,6 +325,12 @@ class AudioRecognition:
                     )
                 )
 
+                if self._second_last_final_transcript_time is not None:
+                    if self._last_speaking_time < self._second_last_final_transcript_time:
+                        logger.debug(
+                            f"_last_speaking_time is lagging behind. {self._last_speaking_time}: {self._second_last_final_transcript_time}")
+                        self._last_speaking_time = time.time()
+
                 if not self._speaking:
                     chat_ctx = self._hooks.retrieve_chat_ctx().copy()
                     self._run_eou_detection(chat_ctx)
@@ -331,6 +338,11 @@ class AudioRecognition:
         elif ev.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
             self._hooks.on_interim_transcript(ev)
             self._audio_interim_transcript = ev.alternatives[0].text
+            if self._second_last_final_transcript_time is not None:
+                if self._last_speaking_time < self._second_last_final_transcript_time:
+                    logger.debug(f"_last_speaking_time is lagging behind {self._last_speaking_time}: {self._second_last_final_transcript_time}")
+                    self._last_speaking_time = time.time()
+
 
         elif ev.type == stt.SpeechEventType.END_OF_SPEECH and self._turn_detection_mode == "stt":
             self._user_turn_committed = True
