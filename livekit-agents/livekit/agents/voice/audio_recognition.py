@@ -338,7 +338,6 @@ class AudioRecognition:
         elif ev.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
             self._hooks.on_interim_transcript(ev)
             self._audio_interim_transcript = ev.alternatives[0].text
-            logger.debug(f"interim transcript: {self._audio_interim_transcript}")
             if self._second_last_final_transcript_time is not None:
                 if self._last_speaking_time < self._second_last_final_transcript_time:
                     logger.debug(f"_last_speaking_time is lagging behind {self._last_speaking_time}: {self._second_last_final_transcript_time}")
