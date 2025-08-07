@@ -694,7 +694,7 @@ class LLMStream(llm.LLMStream):
 
             # for first chunk
             for choice in first_chunk.choices:
-                chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice)
+                chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice, thinking)
                 if discarded_str is not None and len(discarded_str.strip()) > 0:
                     discard_flag = True
                     discarded_buffer = discarded_buffer + discarded_str
@@ -758,7 +758,7 @@ class LLMStream(llm.LLMStream):
             raise APIConnectionError(retryable=retryable) from e
 
     def _parse_choice(
-        self, id: str, choice: Choice, thinking: asyncio.Event, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
+        self, _id: str, choice: Choice, thinking: asyncio.Event, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
 
         # https://github.com/livekit/agents/issues/688
@@ -774,7 +774,7 @@ class LLMStream(llm.LLMStream):
                 call_chunk = None
                 if self._tool_call_id and tool.id and tool.index != self._tool_index:
                     call_chunk = llm.ChatChunk(
-                        id=id,
+                        id=_id,
                         delta=llm.ChoiceDelta(
                             role="assistant",
                             content=delta.content,
@@ -807,7 +807,7 @@ class LLMStream(llm.LLMStream):
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
             call_chunk = llm.ChatChunk(
-                id=id,
+                id=_id,
                 delta=llm.ChoiceDelta(
                     role="assistant",
                     content=delta.content,
@@ -842,6 +842,6 @@ class LLMStream(llm.LLMStream):
             return None, discarded
 
         return llm.ChatChunk(
-            id=id,
+            id=_id,
             delta=llm.ChoiceDelta(content=content, role="assistant")
         ), discarded
