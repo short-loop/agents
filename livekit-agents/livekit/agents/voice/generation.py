@@ -150,8 +150,9 @@ async def _llm_inference_task(
                 if chunk.delta.content:
                     if is_call_transfer_func:
                         logger.info(f"Its a transfer function call, ignoring {chunk.delta.content}")
-                    data.generated_text += chunk.delta.content
-                    text_ch.send_nowait(chunk.delta.content)
+                    else:
+                        data.generated_text += chunk.delta.content
+                        text_ch.send_nowait(chunk.delta.content)
             else:
                 logger.warning(
                     f"LLM node returned an unexpected type: {type(chunk)}",
