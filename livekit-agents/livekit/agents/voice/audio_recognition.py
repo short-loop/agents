@@ -575,5 +575,5 @@ class AudioRecognition:
             "yeah?", "yeah.", "yeah", "yeah,",
             "ya?", "ya.", "ya", "ya,",
             "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
-            "sure?", "sure.", "sure", "sure,"
+            "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup."
         }
