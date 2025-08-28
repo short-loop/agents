@@ -416,7 +416,6 @@ async def _execute_tools_task(
                 fnc_args, fnc_kwargs = llm_utils.prepare_function_arguments(
                     fnc=function_tool,
                     json_arguments=json_args,
-                    extra_text=fnc_call.extra_text,
                     call_ctx=RunContext(
                         session=session,
                         speech_handle=speech_handle,

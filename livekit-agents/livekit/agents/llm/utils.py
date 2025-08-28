@@ -338,7 +338,6 @@ def prepare_function_arguments(
     *,
     fnc: FunctionTool | RawFunctionTool,
     json_arguments: str,  # raw function output from the LLM
-    extra_text: str | None = None,
     call_ctx: RunContext[Any] | None = None,
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:  # returns args, kwargs
     """
