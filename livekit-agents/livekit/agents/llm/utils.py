@@ -372,13 +372,11 @@ def prepare_function_arguments(
 
         model = model_type.model_validate(args_dict)  # can raise ValidationError
         raw_fields = _shallow_model_dump(model)
-        raw_fields["lk_extra_text"] = extra_text
     elif is_raw_function_tool(fnc):
         # e.g async def open_gate(self, raw_arguments: dict[str, object]):
         # raw_arguments is required when using raw function tools
         raw_fields = {
             "raw_arguments": args_dict,
-            "lk_extra_text": extra_text,
         }
     else:
         raise ValueError(f"Unsupported function tool type: {type(fnc)}")
