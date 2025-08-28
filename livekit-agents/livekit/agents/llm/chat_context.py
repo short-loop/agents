@@ -137,6 +137,7 @@ class FunctionCall(BaseModel):
     call_id: str
     arguments: str
     name: str
+    extra_text: str | None = None
     created_at: float = Field(default_factory=time.time)
 
 
