@@ -135,12 +135,17 @@ async def _llm_inference_task(
                         if tool.type != "function":
                             continue
 
+                        # generated_text is not None even in missing content. But we need to forward None if empty
+                        extra_text = None
+                        if data.generated_text is not None and len(data.generated_text) > 0:
+                            extra_text = data.generated_text
+
                         fnc_call = llm.FunctionCall(
                             id=f"{data.id}/fnc_{len(data.generated_functions)}",
                             call_id=tool.call_id,
                             name=tool.name,
                             arguments=tool.arguments,
-                            extra_text=data.generated_text
+                            extra_text=extra_text
                         )
                         data.generated_functions.append(fnc_call)
                         function_ch.send_nowait(fnc_call)
