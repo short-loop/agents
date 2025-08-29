@@ -137,7 +137,7 @@ async def _llm_inference_task(
 
                         # generated_text is not None even in missing content. But we need to forward None if empty
                         extra_text = None
-                        if data.generated_text is not None and len(data.generated_text) > 0:
+                        if data.generated_text is not None and len(data.generated_text.strip()) > 0:
                             extra_text = data.generated_text
 
                         fnc_call = llm.FunctionCall(
