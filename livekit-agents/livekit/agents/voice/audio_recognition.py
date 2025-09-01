@@ -569,11 +569,18 @@ class AudioRecognition:
     def get_excluded_words(self) -> set[str]:
         return {
             "",
+            "uh?", "uh.", "uh", "uh,",
+            "um?", "um.", "um", "um,",
+            "ah?", "ah.", "ah", "ah,",
+            "huh?", "huh.", "huh," "huh",
+            "ugh?", "ugh.", "uhh", "ugh,", "oof",
+            "aye?", "aye.", "aye", "aye,",
+            "hi?", "hi.", "hi", "hi,",
             "hello?", "hello.", "hello", "hello,",
             "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
             "yes?", "yes.", "yes", "yes,",
             "yeah?", "yeah.", "yeah", "yeah,",
             "ya?", "ya.", "ya", "ya,",
             "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
-            "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup."
+            "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup.", "yup,"
         }
