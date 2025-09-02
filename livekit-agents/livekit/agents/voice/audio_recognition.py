@@ -4,6 +4,7 @@ import asyncio
 import json
 import string
 import time
+import re
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -93,6 +94,27 @@ class RecognitionHooks(Protocol):
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def is_bot_interrupted(self) -> bool: ...
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
+    async def update_chat_ctx(self, chat_ctx: llm.ChatContext) -> None: ...
+
+
+def default_backchannel_crutch_words() -> list[str]:
+    return [
+        "",
+        "uh?", "uh.", "uh", "uh,",
+        "um?", "um.", "um", "um,",
+        "ah?", "ah.", "ah", "ah,",
+        "huh?", "huh.", "huh", "huh",
+        "ugh?", "ugh.", "uhh", "ugh,", "oof",
+        "aye?", "aye.", "aye", "aye,",
+        "hi?", "hi.", "hi", "hi,",
+        "hello?", "hello.", "hello", "hello,",
+        "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
+        "yes?", "yes.", "yes", "yes,",
+        "yeah?", "yeah.", "yeah", "yeah,",
+        "ya?", "ya.", "ya", "ya,",
+        "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
+        "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup.", "yup,"
+    ]
 
 
 class AudioRecognition:
@@ -107,6 +129,8 @@ class AudioRecognition:
         max_endpointing_delay: float,
         interrupt_backoff: float,
         turn_detection_mode: TurnDetectionMode | None,
+        backchannel_crutch_words: list[str],
+        commit_crutch_words: list[str]
     ) -> None:
         self._hooks = hooks
         self._audio_input_atask: asyncio.Task[None] | None = None
@@ -140,6 +164,8 @@ class AudioRecognition:
         self._tasks: set[asyncio.Task[Any]] = set()
 
         self._user_turn_span: trace.Span | None = None
+        self._bc_crutch_words = backchannel_crutch_words
+        self._commit_crutch_words = commit_crutch_words
 
     def start(self) -> None:
         self.update_stt(self._stt)
@@ -395,8 +421,17 @@ class AudioRecognition:
             logger.debug(f"words ->: {words}")
             if len(words) == 1:
                 word = words[0]
-                if word.lower() in self.get_excluded_words():
-                    logger.debug("User side crutch word found, returning", extra={"word": word})
+                if self.is_backchannel_word(word):
+                    logger.debug("_run_eou_detection: user side crutch word found, ignoring", extra={"word": word})
+                    self._audio_transcript = ""
+                    return
+
+                if self.is_commit_word(word):
+                    logger.debug("_run_eou_detection: user side crutch word found, committing", extra={"word": word})
+                    chat_ctx = chat_ctx.copy()
+                    chat_ctx.add_message(role="user", content=self._audio_transcript)
+                    self._audio_transcript = ""
+                    asyncio.ensure_future(self._hooks.update_chat_ctx(chat_ctx))
                     return
 
         chat_ctx = chat_ctx.copy()
@@ -566,21 +601,22 @@ class AudioRecognition:
         self._user_turn_span = tracer.start_span("user_turn")
         return self._user_turn_span
 
-    def get_excluded_words(self) -> set[str]:
-        return {
-            "",
-            "uh?", "uh.", "uh", "uh,",
-            "um?", "um.", "um", "um,",
-            "ah?", "ah.", "ah", "ah,",
-            "huh?", "huh.", "huh," "huh",
-            "ugh?", "ugh.", "uhh", "ugh,", "oof",
-            "aye?", "aye.", "aye", "aye,",
-            "hi?", "hi.", "hi", "hi,",
-            "hello?", "hello.", "hello", "hello,",
-            "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
-            "yes?", "yes.", "yes", "yes,",
-            "yeah?", "yeah.", "yeah", "yeah,",
-            "ya?", "ya.", "ya", "ya,",
-            "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
-            "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup.", "yup,"
-        }
+    def is_backchannel_word(self, word: str) -> bool:
+        w = self._strip_word(word)
+        wl = self._bc_crutch_words
+        if wl is None or len(wl) == 0:
+            wl = default_backchannel_crutch_words()
+        return w in wl
+
+    def is_commit_word(self, word: str) -> bool:
+        w = self._strip_word(word)
+        wl = self._commit_crutch_words
+        if wl is None or len(wl) == 0:
+            return False
+        return w in wl
+
+    def _strip_word(self, word: str):
+        w = word.lower().strip()
+        pattern = re.compile('[\\W_]+')
+        return pattern.sub('', w)
+
