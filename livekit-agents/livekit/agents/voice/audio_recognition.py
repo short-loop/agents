@@ -616,5 +616,5 @@ class AudioRecognition:
     def _strip_word(self, word: str):
         w = word.lower().strip()
         pattern = re.compile('[\\W_]+')
-        return pattern.sub('', string.printable)
+        return pattern.sub('', word)
 
