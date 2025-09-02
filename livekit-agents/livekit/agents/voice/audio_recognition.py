@@ -589,6 +589,6 @@ class AudioRecognition:
         return self._user_turn_span
 
     def get_excluded_words(self) -> list[str]:
-        if self._crutch_words is not None:
-            return self._crutch_words
-        return default_crutch_words()
+        if self._crutch_words is None or len(self._crutch_words) == 0:
+            return default_crutch_words()
+        return self._crutch_words
