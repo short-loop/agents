@@ -601,14 +601,14 @@ class AudioRecognition:
         self._user_turn_span = tracer.start_span("user_turn")
         return self._user_turn_span
 
-    def is_backchannel_word(self, word: str) -> list[str]:
+    def is_backchannel_word(self, word: str) -> bool:
         w = self._strip_word(word)
         wl = self._bc_crutch_words
         if wl is None or len(wl) == 0:
-            return default_backchannel_crutch_words()
+            wl = default_backchannel_crutch_words()
         return w in wl
 
-    def is_commit_word(self, word: str) -> list[str]:
+    def is_commit_word(self, word: str) -> bool:
         w = self._strip_word(word)
         wl = self._commit_crutch_words
         if wl is None or len(wl) == 0:
