@@ -111,6 +111,7 @@ class AgentActivity(RecognitionHooks):
 
         self._preemptive_generation: _PreemptiveGeneration | None = None
         self._interrupt_backoff = self._session._interrupt_backoff
+        self._crutch_words = self._session._crutch_words
         self._turn_detection_mode = (
             self.turn_detection if isinstance(self.turn_detection, str) else None
         )
@@ -486,6 +487,7 @@ class AgentActivity(RecognitionHooks):
             max_endpointing_delay=self._session.options.max_endpointing_delay,
             turn_detection_mode=self._turn_detection_mode,
             interrupt_backoff=self._interrupt_backoff,
+            crutch_words=self._crutch_words,
         )
         self._audio_recognition.start()
 

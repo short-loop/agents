@@ -95,6 +95,26 @@ class RecognitionHooks(Protocol):
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
 
 
+def default_crutch_words() -> list[str]:
+    return [
+        "",
+        "uh?", "uh.", "uh", "uh,",
+        "um?", "um.", "um", "um,",
+        "ah?", "ah.", "ah", "ah,",
+        "huh?", "huh.", "huh," "huh",
+        "ugh?", "ugh.", "uhh", "ugh,", "oof",
+        "aye?", "aye.", "aye", "aye,",
+        "hi?", "hi.", "hi", "hi,",
+        "hello?", "hello.", "hello", "hello,",
+        "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
+        "yes?", "yes.", "yes", "yes,",
+        "yeah?", "yeah.", "yeah", "yeah,",
+        "ya?", "ya.", "ya", "ya,",
+        "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
+        "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup.", "yup,"
+    ]
+
+
 class AudioRecognition:
     def __init__(
         self,
@@ -107,6 +127,7 @@ class AudioRecognition:
         max_endpointing_delay: float,
         interrupt_backoff: float,
         turn_detection_mode: TurnDetectionMode | None,
+        crutch_words: list[str]
     ) -> None:
         self._hooks = hooks
         self._audio_input_atask: asyncio.Task[None] | None = None
@@ -140,6 +161,7 @@ class AudioRecognition:
         self._tasks: set[asyncio.Task[Any]] = set()
 
         self._user_turn_span: trace.Span | None = None
+        self._crutch_words = crutch_words
 
     def start(self) -> None:
         self.update_stt(self._stt)
@@ -566,21 +588,7 @@ class AudioRecognition:
         self._user_turn_span = tracer.start_span("user_turn")
         return self._user_turn_span
 
-    def get_excluded_words(self) -> set[str]:
-        return {
-            "",
-            "uh?", "uh.", "uh", "uh,",
-            "um?", "um.", "um", "um,",
-            "ah?", "ah.", "ah", "ah,",
-            "huh?", "huh.", "huh," "huh",
-            "ugh?", "ugh.", "uhh", "ugh,", "oof",
-            "aye?", "aye.", "aye", "aye,",
-            "hi?", "hi.", "hi", "hi,",
-            "hello?", "hello.", "hello", "hello,",
-            "okay?", "okay.", "okay", "okay,", "ok?", "ok.", "ok", "ok,",
-            "yes?", "yes.", "yes", "yes,",
-            "yeah?", "yeah.", "yeah", "yeah,",
-            "ya?", "ya.", "ya", "ya,",
-            "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
-            "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup.", "yup,"
-        }
+    def get_excluded_words(self) -> list[str]:
+        if self._crutch_words is not None:
+            return self._crutch_words
+        return default_crutch_words()
