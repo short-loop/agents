@@ -94,7 +94,7 @@ class RecognitionHooks(Protocol):
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def is_bot_interrupted(self) -> bool: ...
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
-    def update_chat_ctx(self, chat_ctx: llm.ChatContext) -> llm.ChatContext: ...
+    async def update_chat_ctx(self, chat_ctx: llm.ChatContext) -> llm.ChatContext: ...
 
 
 def default_backchannel_crutch_words() -> list[str]:
@@ -423,13 +423,15 @@ class AudioRecognition:
                 word = words[0]
                 if self.is_backchannel_word(word):
                     logger.debug("_run_eou_detection: user side crutch word found, ignoring", extra={"word": word})
+                    self._audio_transcript = ""
                     return
 
                 if self.is_commit_word(word):
                     logger.debug("_run_eou_detection: user side crutch word found, committing", extra={"word": word})
                     chat_ctx = chat_ctx.copy()
                     chat_ctx.add_message(role="user", content=self._audio_transcript)
-                    self._hooks.update_chat_ctx(chat_ctx)
+                    self._audio_transcript = ""
+                    asyncio.ensure_future(self._hooks.update_chat_ctx(chat_ctx))
                     return
 
         chat_ctx = chat_ctx.copy()
