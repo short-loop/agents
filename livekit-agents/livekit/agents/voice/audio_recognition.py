@@ -420,17 +420,16 @@ class AudioRecognition:
             logger.debug(f"words ->: {words}")
             if len(words) == 1:
                 word = words[0].lower().strip()
-                if len(word) > 0:
-                    if word in self.get_backchannel_words():
-                        logger.debug("_run_eou_detection: user side crutch word found, ignoring", extra={"word": word})
-                        return
+                if word in self.get_backchannel_words():
+                    logger.debug("_run_eou_detection: user side crutch word found, ignoring", extra={"word": word})
+                    return
 
-                    if word in self.get_force_commit_words():
-                        logger.debug("_run_eou_detection: user side crutch word found, committing", extra={"word": word})
-                        chat_ctx = chat_ctx.copy()
-                        chat_ctx.add_message(role="user", content=self._audio_transcript)
-                        self._hooks.update_chat_ctx(chat_ctx)
-                        return
+                if word in self.get_force_commit_words():
+                    logger.debug("_run_eou_detection: user side crutch word found, committing", extra={"word": word})
+                    chat_ctx = chat_ctx.copy()
+                    chat_ctx.add_message(role="user", content=self._audio_transcript)
+                    self._hooks.update_chat_ctx(chat_ctx)
+                    return
 
         chat_ctx = chat_ctx.copy()
         chat_ctx.add_message(role="user", content=self._audio_transcript)
