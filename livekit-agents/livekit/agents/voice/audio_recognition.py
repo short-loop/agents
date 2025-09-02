@@ -93,9 +93,10 @@ class RecognitionHooks(Protocol):
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def is_bot_interrupted(self) -> bool: ...
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
+    def update_chat_ctx(self, chat_ctx: llm.ChatContext) -> llm.ChatContext: ...
 
 
-def default_crutch_words() -> list[str]:
+def default_backchannel_crutch_words() -> list[str]:
     return [
         "",
         "uh?", "uh.", "uh", "uh,",
@@ -127,7 +128,8 @@ class AudioRecognition:
         max_endpointing_delay: float,
         interrupt_backoff: float,
         turn_detection_mode: TurnDetectionMode | None,
-        crutch_words: list[str]
+        backchannel_crutch_words: list[str],
+        commit_crutch_words: list[str]
     ) -> None:
         self._hooks = hooks
         self._audio_input_atask: asyncio.Task[None] | None = None
@@ -161,7 +163,8 @@ class AudioRecognition:
         self._tasks: set[asyncio.Task[Any]] = set()
 
         self._user_turn_span: trace.Span | None = None
-        self._crutch_words = crutch_words
+        self._bc_crutch_words = crutch_words
+        self._commit_crutch_words = commit_crutch_words
 
     def start(self) -> None:
         self.update_stt(self._stt)
@@ -416,10 +419,18 @@ class AudioRecognition:
             words = self.current_transcript.strip().split()
             logger.debug(f"words ->: {words}")
             if len(words) == 1:
-                word = words[0]
-                if word.lower() in self.get_excluded_words():
-                    logger.debug("User side crutch word found, returning", extra={"word": word})
-                    return
+                word = words[0].lower().strip()
+                if len(word) > 0:
+                    if word in self.get_backchannel_words():
+                        logger.debug("_run_eou_detection: user side crutch word found, ignoring", extra={"word": word})
+                        return
+
+                    if word in self.get_force_commit_words():
+                        logger.debug("_run_eou_detection: user side crutch word found, committing", extra={"word": word})
+                        chat_ctx = chat_ctx.copy()
+                        chat_ctx.add_message(role="user", content=self._audio_transcript)
+                        self._hooks.update_chat_ctx(chat_ctx)
+                        return
 
         chat_ctx = chat_ctx.copy()
         chat_ctx.add_message(role="user", content=self._audio_transcript)
@@ -588,7 +599,10 @@ class AudioRecognition:
         self._user_turn_span = tracer.start_span("user_turn")
         return self._user_turn_span
 
-    def get_excluded_words(self) -> list[str]:
-        if self._crutch_words is None or len(self._crutch_words) == 0:
-            return default_crutch_words()
-        return self._crutch_words
+    def get_backchannel_words(self) -> list[str]:
+        if self._bc_crutch_words is None or len(self._bc_crutch_words) == 0:
+            return default_backchannel_crutch_words()
+        return self._bc_crutch_words
+
+    def get_force_commit_words(self) -> list[str]:
+        return self._commit_crutch_words

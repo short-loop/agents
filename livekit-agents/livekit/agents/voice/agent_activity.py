@@ -111,7 +111,8 @@ class AgentActivity(RecognitionHooks):
 
         self._preemptive_generation: _PreemptiveGeneration | None = None
         self._interrupt_backoff = self._session._interrupt_backoff
-        self._crutch_words = self._session._crutch_words
+        self._bc_crutch_words = self._session._bc_crutch_words
+        self._commit_crutch_words = self._session._commit_crutch_words
         self._turn_detection_mode = (
             self.turn_detection if isinstance(self.turn_detection, str) else None
         )
@@ -487,7 +488,8 @@ class AgentActivity(RecognitionHooks):
             max_endpointing_delay=self._session.options.max_endpointing_delay,
             turn_detection_mode=self._turn_detection_mode,
             interrupt_backoff=self._interrupt_backoff,
-            crutch_words=self._crutch_words,
+            backchannel_crutch_words=self._bc_crutch_words,
+            commit_crutch_words=self._commit_crutch_words
         )
         self._audio_recognition.start()
 
@@ -1049,14 +1051,18 @@ class AgentActivity(RecognitionHooks):
                 # Split into words by whitespace
                 words = text.strip().split()
                 if len(words) == 1:
-                    word = words[0]
-                    logger.debug(f"User Speaking: {word}")
-                    logger.debug(f"Excluded: {self._audio_recognition.get_excluded_words()}")
-                    if word.lower() in self._audio_recognition.get_excluded_words():
-                        logger.debug("User side crutch word found, returning", extra={"word": word})
-                        return
+                    word = words[0].lower().strip()
+                    if len(word) > 0:
+                        if word in self._audio_recognition.get_backchannel_words():
+                            logger.debug("vad_inference: user side backchanneling crutch word found, not interrupting",
+                                         extra={"word": word})
+                            return
 
-            ####
+                        if word in self._audio_recognition.get_force_commit_words():
+                            logger.debug("vad_inference: user side commit crutch word found, not interrupting",
+                                         extra={"word": word})
+                            return
+
         if self._rt_session is not None:
             self._rt_session.start_user_activity()
 
