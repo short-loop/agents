@@ -163,7 +163,7 @@ class AudioRecognition:
         self._tasks: set[asyncio.Task[Any]] = set()
 
         self._user_turn_span: trace.Span | None = None
-        self._bc_crutch_words = crutch_words
+        self._bc_crutch_words = backchannel_crutch_words
         self._commit_crutch_words = commit_crutch_words
 
     def start(self) -> None:
