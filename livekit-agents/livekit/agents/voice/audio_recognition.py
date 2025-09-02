@@ -4,6 +4,7 @@ import asyncio
 import json
 import string
 import time
+import re
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -102,7 +103,7 @@ def default_backchannel_crutch_words() -> list[str]:
         "uh?", "uh.", "uh", "uh,",
         "um?", "um.", "um", "um,",
         "ah?", "ah.", "ah", "ah,",
-        "huh?", "huh.", "huh," "huh",
+        "huh?", "huh.", "huh", "huh",
         "ugh?", "ugh.", "uhh", "ugh,", "oof",
         "aye?", "aye.", "aye", "aye,",
         "hi?", "hi.", "hi", "hi,",
@@ -419,12 +420,12 @@ class AudioRecognition:
             words = self.current_transcript.strip().split()
             logger.debug(f"words ->: {words}")
             if len(words) == 1:
-                word = words[0].lower().strip()
-                if word in self.get_backchannel_words():
+                word = words[0]
+                if self.is_backchannel_word(word):
                     logger.debug("_run_eou_detection: user side crutch word found, ignoring", extra={"word": word})
                     return
 
-                if word in self.get_force_commit_words():
+                if self.is_commit_word(word):
                     logger.debug("_run_eou_detection: user side crutch word found, committing", extra={"word": word})
                     chat_ctx = chat_ctx.copy()
                     chat_ctx.add_message(role="user", content=self._audio_transcript)
@@ -598,10 +599,22 @@ class AudioRecognition:
         self._user_turn_span = tracer.start_span("user_turn")
         return self._user_turn_span
 
-    def get_backchannel_words(self) -> list[str]:
-        if self._bc_crutch_words is None or len(self._bc_crutch_words) == 0:
+    def is_backchannel_word(self, word: str) -> list[str]:
+        w = self._strip_word(word)
+        wl = self._bc_crutch_words
+        if wl is None or len(wl) == 0:
             return default_backchannel_crutch_words()
-        return self._bc_crutch_words
+        return w in wl
 
-    def get_force_commit_words(self) -> list[str]:
-        return self._commit_crutch_words
+    def is_commit_word(self, word: str) -> list[str]:
+        w = self._strip_word(word)
+        wl = self._commit_crutch_words
+        if wl is None or len(wl) == 0:
+            return False
+        return w in wl
+
+    def _strip_word(self, word: str):
+        w = word.lower().strip()
+        pattern = re.compile('[\W_]+')
+        return pattern.sub('', string.printable)
+

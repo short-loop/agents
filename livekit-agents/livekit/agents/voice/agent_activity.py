@@ -1051,13 +1051,13 @@ class AgentActivity(RecognitionHooks):
                 # Split into words by whitespace
                 words = text.strip().split()
                 if len(words) == 1:
-                    word = words[0].lower().strip()
-                    if word in self._audio_recognition.get_backchannel_words():
+                    word = words[0]
+                    if self._audio_recognition.is_backchannel_word(word):
                         logger.debug("vad_inference: user side backchanneling crutch word found, not interrupting",
                                      extra={"word": word})
                         return
 
-                    if word in self._audio_recognition.get_force_commit_words():
+                    if self._audio_recognition.is_commit_word(word):
                         logger.debug("vad_inference: user side commit crutch word found, not interrupting",
                                      extra={"word": word})
                         return
