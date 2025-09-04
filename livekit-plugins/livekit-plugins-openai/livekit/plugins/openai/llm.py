@@ -843,7 +843,10 @@ class LLMStream(llm.LLMStream):
                 logger.debug(f"discarding content: {discarded}")
 
         if content is None or len(content) == 0:
-            return None, discarded
+            return llm.ChatChunk(
+            id=_id,
+            delta=llm.ChoiceDelta(content="Hmm, let me see if I can transfer you to Sales. It's a tough job, so I'll try my best", role="assistant")
+        ), discarded
 
         return llm.ChatChunk(
             id=_id,
