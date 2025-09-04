@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass
+from json import JSONDecodeError
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -773,11 +775,12 @@ class LLMStream(llm.LLMStream):
 
                 call_chunk = None
                 if self._tool_call_id and tool.id and tool.index != self._tool_index:
+                    content = delta.content if delta.content is not None else "Hmm, let me see if I can transfer you to Sales. It's a tough job, so I'll try my best"
                     call_chunk = llm.ChatChunk(
                         id=_id,
                         delta=llm.ChoiceDelta(
                             role="assistant",
-                            content=delta.content,
+                            content=content,
                             tool_calls=[
                                 llm.FunctionToolCall(
                                     arguments=self._fnc_raw_arguments or "",
@@ -806,11 +809,12 @@ class LLMStream(llm.LLMStream):
                     return call_chunk, None
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
+            content = delta.content if delta.content is not None else "Hmm, let me see if I can transfer you to Sales. It's a tough job, so I'll try my best"
             call_chunk = llm.ChatChunk(
                 id=_id,
                 delta=llm.ChoiceDelta(
                     role="assistant",
-                    content=delta.content,
+                    content=content,
                     tool_calls=[
                         llm.FunctionToolCall(
                             arguments=self._fnc_raw_arguments or "",
