@@ -130,7 +130,6 @@ async def _llm_inference_task(
             elif isinstance(chunk, ChatChunk):
                 if not chunk.delta:
                     continue
-                is_call_transfer_func = False
                 if chunk.delta.tool_calls:
                     for tool in chunk.delta.tool_calls:
                         if tool.type != "function":
@@ -142,15 +141,10 @@ async def _llm_inference_task(
                             name=tool.name,
                             arguments=tool.arguments,
                         )
-                        if tool.name == "transfer_call":
-                            is_call_transfer_func = True
                         data.generated_functions.append(fnc_call)
                         function_ch.send_nowait(fnc_call)
 
                 if chunk.delta.content:
-                    if is_call_transfer_func:
-                        logger.info(f"Its a transfer function call, ignoring {chunk.delta.content}")
-                    else:
                         data.generated_text += chunk.delta.content
                         text_ch.send_nowait(chunk.delta.content)
             else:
