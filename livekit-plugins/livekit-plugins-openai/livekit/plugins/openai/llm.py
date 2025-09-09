@@ -624,7 +624,7 @@ class LLMStream(llm.LLMStream):
         tools: list[FunctionTool | RawFunctionTool],
         conn_options: APIConnectOptions,
         extra_kwargs: dict[str, Any],
-        level:int
+        level:int | None
     ) -> None:
         super().__init__(llm, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options)
         self._model = model
@@ -653,11 +653,12 @@ class LLMStream(llm.LLMStream):
     async def _parallel_inference(self, messages, fnc_ctx):
         # task1 = asyncio.create_task(self._stream_with_first_chunk(1, messages, fnc_ctx))
         # task2 = asyncio.create_task(self._stream_with_first_chunk(2, messages, fnc_ctx))
-        logger.info(f"starting parallel inference with {self._level} hedging")
+        hedge_level = self._level if isinstance(self._level, int) and self._level > 0 else 1
+        logger.info(f"starting parallel inference with {hedge_level} hedging")
         task_list = []
-        for i in range(self._level):
+        for i in range(hedge_level):
             task_list.append(asyncio.create_task(self._stream_with_first_chunk(i+1, messages, fnc_ctx)))
-            logger.info(f"Processing chunk {i+1}/{self._level}")
+            logger.info(f"Processing chunk {i+1}/{hedge_level}")
 
         done, pending = await asyncio.wait(
             task_list,
