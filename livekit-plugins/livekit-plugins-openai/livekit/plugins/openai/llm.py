@@ -607,8 +607,7 @@ class LLM(llm.LLM):
             chat_ctx=chat_ctx,
             tools=tools or [],
             conn_options=conn_options,
-            extra_kwargs=extra,
-            level = self.level
+            extra_kwargs=extra
         )
 
 
@@ -623,8 +622,7 @@ class LLMStream(llm.LLMStream):
         chat_ctx: llm.ChatContext,
         tools: list[FunctionTool | RawFunctionTool],
         conn_options: APIConnectOptions,
-        extra_kwargs: dict[str, Any],
-        level:int | None
+        extra_kwargs: dict[str, Any]
     ) -> None:
         super().__init__(llm, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options)
         self._model = model
@@ -632,7 +630,6 @@ class LLMStream(llm.LLMStream):
         self._client = client
         self._llm = llm
         self._extra_kwargs = extra_kwargs
-        self._level = level
 
     async def _stream_with_first_chunk(self, stream_id, messages, fnc_ctx):
         start = time.time()
@@ -653,7 +650,7 @@ class LLMStream(llm.LLMStream):
     async def _parallel_inference(self, messages, fnc_ctx):
         # task1 = asyncio.create_task(self._stream_with_first_chunk(1, messages, fnc_ctx))
         # task2 = asyncio.create_task(self._stream_with_first_chunk(2, messages, fnc_ctx))
-        hedge_level = self._level if isinstance(self._level, int) and self._level > 0 else 1
+        hedge_level = self._llm.level if isinstance(self._llm.level, int) and self._llm.level > 0 else 1
         logger.info(f"starting parallel inference with {hedge_level} hedging")
         task_list = []
         for i in range(hedge_level):
@@ -698,7 +695,7 @@ class LLMStream(llm.LLMStream):
 
             thinking = asyncio.Event()
             logger.info("starting parallel inference")
-            logger.info(f"Hitting {self._level} requests for hedging")
+            logger.info(f"Hitting {self._llm.level} requests for hedging")
             start_inference = time.time()
             stream_id, stream, iterator, first_chunk = await self._parallel_inference(cast(list[ChatCompletionMessageParam], chat_ctx), fnc_ctx)
             logger.debug(f"using llm stream {stream_id}")
