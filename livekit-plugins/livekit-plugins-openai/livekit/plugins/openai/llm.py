@@ -656,7 +656,7 @@ class LLMStream(llm.LLMStream):
         logger.info(f"starting parallel inference with {self._level} hedging")
         task_list = []
         for i in range(self._level):
-            task_list.append(await self._stream_with_first_chunk(i+1, messages, fnc_ctx))
+            task_list.append(self._stream_with_first_chunk(i+1, messages, fnc_ctx))
             logger.info(f"Processing chunk {i+1}/{self._level}")
 
         done, pending = await asyncio.wait(
