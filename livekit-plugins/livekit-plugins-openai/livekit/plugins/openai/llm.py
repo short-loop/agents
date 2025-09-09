@@ -93,6 +93,7 @@ class LLM(llm.LLM):
         max_completion_tokens: NotGivenOr[int] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
         _provider_fmt: NotGivenOr[str] = NOT_GIVEN,
+        level:int = 1
     ) -> None:
         """
         Create a new instance of OpenAI LLM.
@@ -101,6 +102,7 @@ class LLM(llm.LLM):
         ``OPENAI_API_KEY`` environmental variable.
         """
         super().__init__()
+        self.level = level
         self._opts = _LLMOptions(
             model=model,
             user=user,
@@ -152,6 +154,7 @@ class LLM(llm.LLM):
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
+        level:int = 1
     ) -> LLM:
         """
         This automatically infers the following arguments from their corresponding environment variables if they are not provided:
@@ -186,6 +189,7 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
+            level = level,
         )
 
     @staticmethod
@@ -604,6 +608,7 @@ class LLM(llm.LLM):
             tools=tools or [],
             conn_options=conn_options,
             extra_kwargs=extra,
+            level = self.level
         )
 
 
@@ -619,6 +624,7 @@ class LLMStream(llm.LLMStream):
         tools: list[FunctionTool | RawFunctionTool],
         conn_options: APIConnectOptions,
         extra_kwargs: dict[str, Any],
+        level:int
     ) -> None:
         super().__init__(llm, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options)
         self._model = model
@@ -626,6 +632,7 @@ class LLMStream(llm.LLMStream):
         self._client = client
         self._llm = llm
         self._extra_kwargs = extra_kwargs
+        self._level = level
 
     async def _stream_with_first_chunk(self, stream_id, messages, fnc_ctx):
         start = time.time()
@@ -644,11 +651,16 @@ class LLMStream(llm.LLMStream):
         return stream_id, stream, iterator, first_chunk
 
     async def _parallel_inference(self, messages, fnc_ctx):
-        task1 = asyncio.create_task(self._stream_with_first_chunk(1, messages, fnc_ctx))
-        task2 = asyncio.create_task(self._stream_with_first_chunk(2, messages, fnc_ctx))
+        # task1 = asyncio.create_task(self._stream_with_first_chunk(1, messages, fnc_ctx))
+        # task2 = asyncio.create_task(self._stream_with_first_chunk(2, messages, fnc_ctx))
+        logger.info(f"starting parallel inference with {self._level} hedging")
+        task_list = []
+        for i in range(self._level):
+            task_list.append(await self._stream_with_first_chunk(i+1, messages, fnc_ctx))
+            logger.info(f"Processing chunk {i+1}/{self._level}")
 
         done, pending = await asyncio.wait(
-            [task1, task2],
+            task_list,
             return_when=asyncio.FIRST_COMPLETED
         )
         fastest = done.pop().result()
@@ -685,6 +697,7 @@ class LLMStream(llm.LLMStream):
 
             thinking = asyncio.Event()
             logger.info("starting parallel inference")
+            logger.info(f"Hitting {self._level} requests for hedging")
             start_inference = time.time()
             stream_id, stream, iterator, first_chunk = await self._parallel_inference(cast(list[ChatCompletionMessageParam], chat_ctx), fnc_ctx)
             logger.debug(f"using llm stream {stream_id}")
