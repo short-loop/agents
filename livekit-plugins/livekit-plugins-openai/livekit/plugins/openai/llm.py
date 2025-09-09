@@ -655,7 +655,6 @@ class LLMStream(llm.LLMStream):
         task_list = []
         for i in range(hedge_level):
             task_list.append(asyncio.create_task(self._stream_with_first_chunk(i+1, messages, fnc_ctx)))
-            logger.info(f"Processing chunk {i+1}/{hedge_level}")
 
         done, pending = await asyncio.wait(
             task_list,
