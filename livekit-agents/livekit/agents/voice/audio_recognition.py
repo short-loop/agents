@@ -83,6 +83,58 @@ def ends_with_number_like(chat_ctx: llm.ChatContext):
         logger.error(f"Encountered an exception in ends_with_number_like: {ex} {s}")
         return False
 
+def ends_with_alpha_numeric(chat_ctx: llm.ChatContext):
+    try:
+        number_words = {"zero", "one", "two", "three", "four", "five",
+                        "six", "seven", "eight", "nine", "ten"}
+
+        military_letters = {
+            "alpha": "a", "bravo": "b", "charlie": "c", "delta": "d", "echo": "e",
+            "foxtrot": "f", "golf": "g", "hotel": "h", "india": "i", "juliett": "j",
+            "kilo": "k", "lima": "l", "mike": "m", "november": "n", "oscar": "o",
+            "papa": "p", "quebec": "q", "romeo": "r", "sierra": "s", "tango": "t",
+            "uniform": "u", "victor": "v", "whiskey": "w", "x-ray": "x",
+            "yankee": "y", "zulu": "z"
+        }
+
+        def is_number(word: str) -> bool:
+            return word.isdigit() or word.lower() in number_words
+
+        def is_character(word: str) -> bool:
+            return (
+                    len(word) == 1 and word.isalpha()
+            ) or word.lower() in military_letters
+
+        def last_two_are_alphanumeric(words: list[str]) -> bool:
+            if len(words) < 2:
+                return False
+
+            w1, w2 = words[-2], words[-1]
+            return (
+                    (is_number(w1) and is_number(w2)) or
+                    (is_character(w1) and is_character(w2)) or
+                    (is_number(w1) and is_character(w2)) or
+                    (is_character(w1) and is_number(w2))
+            )
+        if len(chat_ctx.items) == 0:
+            return False
+        last_element = chat_ctx.items[-1]
+        if last_element.role != "user":
+            return False
+        if last_element.type != "message":
+            return False
+        s = last_element.text_content
+
+        # Remove punctuation at the end
+        s = s.rstrip(".,!?").lower()
+        words = s.split()
+        logger.debug(f"words: {words}")
+        return last_two_are_alphanumeric(words)
+    except Exception as ex:
+        logger.error(f"Encountered an exception in ends_with_alpha_numeric: {ex} {s}")
+        return False
+
+
 class RecognitionHooks(Protocol):
     def on_start_of_speech(self, ev: vad.VADEvent) -> None: ...
     def on_vad_inference_done(self, ev: vad.VADEvent) -> None: ...
@@ -454,6 +506,10 @@ class AudioRecognition:
             elif ends_with_number_like(chat_ctx):
                 endpointing_delay = self._max_endpointing_delay
                 logger.debug("Ending with number, endpointing_delay: %s", endpointing_delay)
+                extra_sleep = self._max_endpointing_delay
+            elif ends_with_alpha_numeric(chat_ctx):
+                endpointing_delay = self._max_endpointing_delay
+                logger.debug("Ending with alpha numeric, endpointing_delay: %s", endpointing_delay)
                 extra_sleep = self._max_endpointing_delay
             elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
