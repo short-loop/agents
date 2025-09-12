@@ -96,9 +96,12 @@ class RecognitionHooks(Protocol):
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
     async def update_chat_ctx(self, chat_ctx: llm.ChatContext) -> None: ...
 
+pattern = re.compile('[\\W_]+')
+def _strip_word(word: str):
+    w = word.lower().strip()
+    return pattern.sub('', w)
 
-def default_backchannel_crutch_words() -> list[str]:
-    return [
+default_backchannel_crutch_words = {
         "",
         "uh?", "uh.", "uh", "uh,",
         "um?", "um.", "um", "um,",
@@ -114,8 +117,9 @@ def default_backchannel_crutch_words() -> list[str]:
         "ya?", "ya.", "ya", "ya,",
         "hm?", "hm.", "hm", "hm,", "hmm?", "hmm.", "hmm", "hmm,",
         "sure?", "sure.", "sure", "sure,", "uh-huh", "uh-huh.", "Mm-hmm", "Mm-hmm.", "yep", "yep.", "yup", "yup.", "yup,"
-    ]
+}
 
+stripped_backchannel_crutch_words = set(_strip_word(w) for w in default_backchannel_crutch_words)
 
 class AudioRecognition:
     def __init__(
@@ -602,21 +606,16 @@ class AudioRecognition:
         return self._user_turn_span
 
     def is_backchannel_word(self, word: str) -> bool:
-        w = self._strip_word(word)
+        w = _strip_word(word)
         wl = self._bc_crutch_words
         if wl is None or len(wl) == 0:
-            wl = default_backchannel_crutch_words()
+            wl = stripped_backchannel_crutch_words
         return w in wl
 
     def is_commit_word(self, word: str) -> bool:
-        w = self._strip_word(word)
+        w = _strip_word(word)
         wl = self._commit_crutch_words
         if wl is None or len(wl) == 0:
             return False
         return w in wl
-
-    def _strip_word(self, word: str):
-        w = word.lower().strip()
-        pattern = re.compile('[\\W_]+')
-        return pattern.sub('', w)
 
