@@ -131,7 +131,7 @@ class LLM(llm.LLM):
                 ),
             ),
         )
-
+        self._secondary_client = None
         if use_with_openai_llm == True and is_given(openai_api_key) is not None:
             self._secondary_client = openai.AsyncClient(
             api_key=openai_api_key if is_given(openai_api_key) else None,
