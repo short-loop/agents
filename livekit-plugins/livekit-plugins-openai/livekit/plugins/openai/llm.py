@@ -81,7 +81,7 @@ class LLM(llm.LLM):
         self,
         *,
         model: str | ChatModels = "gpt-4o",
-        api_key: NotGivenOr[str] = NOT_GIVEN,
+        openai_api_key: NotGivenOr[str] = NOT_GIVEN,
         base_url: NotGivenOr[str] = NOT_GIVEN,
         client: openai.AsyncClient | None = None,
         user: NotGivenOr[str] = NOT_GIVEN,
@@ -93,6 +93,7 @@ class LLM(llm.LLM):
         max_completion_tokens: NotGivenOr[int] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
         _provider_fmt: NotGivenOr[str] = NOT_GIVEN,
+        use_with_openai_llm: bool = False,
         level:int = 1
     ) -> None:
         """
@@ -115,7 +116,25 @@ class LLM(llm.LLM):
         )
         self._provider_fmt = _provider_fmt or "openai"
         self._client = client or openai.AsyncClient(
-            api_key=api_key if is_given(api_key) else None,
+            api_key=openai_api_key if is_given(openai_api_key) else None,
+            base_url=base_url if is_given(base_url) else None,
+            max_retries=0,
+            http_client=httpx.AsyncClient(
+                timeout=timeout
+                if timeout
+                else httpx.Timeout(connect=15.0, read=5.0, write=5.0, pool=5.0),
+                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_connections=50,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=120,
+                ),
+            ),
+        )
+        self._secondary_client = None
+        if use_with_openai_llm == True and is_given(openai_api_key) is not None:
+            self._secondary_client = openai.AsyncClient(
+            api_key=openai_api_key if is_given(openai_api_key) else None,
             base_url=base_url if is_given(base_url) else None,
             max_retries=0,
             http_client=httpx.AsyncClient(
@@ -142,8 +161,9 @@ class LLM(llm.LLM):
         model: str | ChatModels = "gpt-4o",
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
-        api_version: str | None = None,
-        api_key: str | None = None,
+        azure_api_version: str | None = None,
+        azure_api_key: str | None = None,
+        openai_api_key: str | None = None,
         azure_ad_token: str | None = None,
         azure_ad_token_provider: AsyncAzureADTokenProvider | None = None,
         organization: str | None = None,
@@ -154,6 +174,7 @@ class LLM(llm.LLM):
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
+        use_with_openai_llm = False,
         level:int = 1
     ) -> LLM:
         """
@@ -170,8 +191,8 @@ class LLM(llm.LLM):
             max_retries=0,
             azure_endpoint=azure_endpoint,
             azure_deployment=azure_deployment,
-            api_version=api_version,
-            api_key=api_key,
+            api_version=azure_api_version,
+            api_key=azure_api_key,
             azure_ad_token=azure_ad_token,
             azure_ad_token_provider=azure_ad_token_provider,
             organization=organization,
@@ -189,6 +210,8 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
+            use_with_openai_llm=use_with_openai_llm,
+            openai_api_key=openai_api_key,
             level = level,
         )
 
@@ -604,6 +627,7 @@ class LLM(llm.LLM):
             model=self._opts.model,
             provider_fmt=self._provider_fmt,
             client=self._client,
+            secondary_client=self._secondary_client,
             chat_ctx=chat_ctx,
             tools=tools or [],
             conn_options=conn_options,
@@ -619,6 +643,7 @@ class LLMStream(llm.LLMStream):
         model: str | ChatModels,
         provider_fmt: str,
         client: openai.AsyncClient,
+        secondary_client: openai.AsyncClient,
         chat_ctx: llm.ChatContext,
         tools: list[FunctionTool | RawFunctionTool],
         conn_options: APIConnectOptions,
@@ -628,12 +653,19 @@ class LLMStream(llm.LLMStream):
         self._model = model
         self._provider_fmt = provider_fmt
         self._client = client
+        self._secondary_client = secondary_client
         self._llm = llm
         self._extra_kwargs = extra_kwargs
 
     async def _stream_with_first_chunk(self, stream_id, messages, fnc_ctx):
         start = time.time()
-        stream = await self._client.chat.completions.create(
+        client_in_use = self._client
+        if stream_id > 1 and self._secondary_client is not None:
+            logger.info("Using secondary client")
+            client_in_use = self._secondary_client
+        else:
+            logger.info("Using primary client")
+        stream = await client_in_use.chat.completions.create(
             messages=messages,
             model=self._model,
             tools = fnc_ctx,
