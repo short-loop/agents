@@ -106,16 +106,17 @@ def ends_with_alpha_numeric(chat_ctx: llm.ChatContext):
             ) or word.lower() in military_letters
 
         def last_two_are_alphanumeric(words: list[str]) -> bool:
-            if len(words) < 2:
+            if len(words) < 4:
+                return False
+            last_four = words[-4:]
+
+            # All must be either numbers or characters (including military words)
+            if not all(is_number(w) or is_character(w) for w in last_four):
                 return False
 
-            w1, w2 = words[-2], words[-1]
-            return (
-                    (is_number(w1) and is_number(w2)) or
-                    (is_character(w1) and is_character(w2)) or
-                    (is_number(w1) and is_character(w2)) or
-                    (is_character(w1) and is_number(w2))
-            )
+            # Must contain at least one number
+            return any(is_number(w) for w in last_four)
+
         if len(chat_ctx.items) == 0:
             return False
         last_element = chat_ctx.items[-1]
@@ -512,9 +513,9 @@ class AudioRecognition:
                 logger.debug("Ending with number, endpointing_delay: %s", endpointing_delay)
                 extra_sleep = self._max_endpointing_delay
             elif ends_with_alpha_numeric(chat_ctx):
-                endpointing_delay = self._max_endpointing_delay
+                endpointing_delay = self._max_endpointing_delay - 1
                 logger.debug("Ending with alpha numeric, endpointing_delay: %s", endpointing_delay)
-                extra_sleep = self._max_endpointing_delay
+                extra_sleep = self._max_endpointing_delay - 1
             elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.debug("Turn detector does not support language %s", self._last_language)
