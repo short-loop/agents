@@ -53,11 +53,7 @@ def ends_with_number_like(chat_ctx: llm.ChatContext):
     try:
         number_words = {
             "zero", "one", "two", "three", "four", "five",
-            "six", "seven", "eight", "nine", "ten",
-            "eleven", "twelve", "thirteen", "fourteen", "fifteen",
-            "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
-            "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
-            "hundred", "thousand"
+            "six", "seven", "eight", "nine"
         }
         if len(chat_ctx.items) == 0:
             return False
@@ -73,9 +69,13 @@ def ends_with_number_like(chat_ctx: llm.ChatContext):
         words = s.split()
 
         found = False
+        count = 0
         for word in reversed(words):
             if word.isdigit() or word in number_words:
-                found = True
+                count += 1
+                if count == 2:
+                    found = True
+                    break
             else:
                 break
         return found
