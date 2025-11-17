@@ -1150,6 +1150,11 @@ class AgentActivity(RecognitionHooks):
     def is_bot_speaking(self) -> bool:
         return self._session.agent_state == "speaking"
 
+    def get_last_user_language(self) -> str:
+        if self._audio_recognition is None:
+            return None
+        return self._audio_recognition.get_last_user_language()
+
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool:
         # IMPORTANT: This method is sync to avoid it being cancelled by the AudioRecognition
         # We explicitly create a new task here

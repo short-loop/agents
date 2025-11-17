@@ -355,6 +355,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
     def current_speech(self) -> SpeechHandle | None:
         return self._activity.current_speech if self._activity is not None else None
 
+    def get_last_user_language(self) -> Language | None:
+        if self._activity is None:
+            return None
+        return self._activity.get_last_user_language()
+
     @property
     def user_state(self) -> UserState:
         return self._user_state

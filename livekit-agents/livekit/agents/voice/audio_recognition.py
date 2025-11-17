@@ -23,7 +23,7 @@ from .agent import ModelSettings
 if TYPE_CHECKING:
     from .agent_session import TurnDetectionMode
 
-MIN_LANGUAGE_DETECTION_LENGTH = 5
+MIN_LANGUAGE_DETECTION_LENGTH = 3
 
 
 @dataclass
@@ -365,6 +365,9 @@ class AudioRecognition:
         if self._audio_interim_transcript:
             return self._audio_transcript + " " + self._audio_interim_transcript
         return self._audio_transcript
+
+    def get_last_user_language(self) -> str:
+        return self._last_language
 
     async def _on_stt_event(self, ev: stt.SpeechEvent) -> None:
         if (
