@@ -224,6 +224,7 @@ class LLM(llm.LLM):
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
         reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
+        verbosity: NotGivenOr[Verbosity] = NOT_GIVEN,
         top_p: NotGivenOr[float] = NOT_GIVEN,
         use_with_openai_llm = False,
         level:int = 1
@@ -262,6 +263,7 @@ class LLM(llm.LLM):
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
             reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
             safety_identifier=safety_identifier,
             prompt_cache_key=prompt_cache_key,
             top_p=top_p,
