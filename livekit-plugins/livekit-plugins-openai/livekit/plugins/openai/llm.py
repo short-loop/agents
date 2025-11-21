@@ -264,8 +264,6 @@ class LLM(llm.LLM):
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of Cerebras LLM.
@@ -671,12 +669,6 @@ class LLM(llm.LLM):
 
         if is_given(self._opts.reasoning_effort):
             extra["reasoning_effort"] = self._opts.reasoning_effort
-
-        if is_given(self._opts.safety_identifier):
-            extra["safety_identifier"] = self._opts.safety_identifier
-
-        if is_given(self._opts.prompt_cache_key):
-            extra["prompt_cache_key"] = self._opts.prompt_cache_key
 
         if is_given(self._opts.verbosity):
             extra["verbosity"] = self._opts.verbosity
