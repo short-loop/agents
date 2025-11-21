@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from dataclasses import asdict, dataclass
-from typing import Any, cast, Literal
+from dataclasses import dataclass
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -35,7 +35,6 @@ from livekit.agents.types import (
     NotGivenOr,
 )
 from livekit.agents.utils import is_given
-from openai.types import ReasoningEffort
 from openai.types.chat import (
     ChatCompletionChunk,
     ChatCompletionMessageParam,
@@ -48,23 +47,16 @@ from .log import logger
 from .models import (
     CerebrasChatModels,
     ChatModels,
-    CometAPIChatModels,
     DeepSeekChatModels,
-    NebiusChatModels,
     OctoChatModels,
-    OpenRouterProviderPreferences,
-    OpenRouterWebPlugin,
     PerplexityChatModels,
     TelnyxChatModels,
     TogetherChatModels,
     XAIChatModels,
-    _supports_reasoning_effort,
 )
 from .utils import AsyncAzureADTokenProvider, to_fnc_ctx
 
 lk_oai_debug = int(os.getenv("LK_OPENAI_DEBUG", 0))
-
-Verbosity = Literal["low", "medium", "high"]
 
 @dataclass
 class IncomingFunctionCallEvent:
@@ -76,21 +68,12 @@ class IncomingFunctionCallEvent:
 class _LLMOptions:
     model: str | ChatModels
     user: NotGivenOr[str]
-    safety_identifier: NotGivenOr[str]
-    prompt_cache_key: NotGivenOr[str]
     temperature: NotGivenOr[float]
-    top_p: NotGivenOr[float]
     parallel_tool_calls: NotGivenOr[bool]
     tool_choice: NotGivenOr[ToolChoice]
     store: NotGivenOr[bool]
     metadata: NotGivenOr[dict[str, str]]
     max_completion_tokens: NotGivenOr[int]
-    service_tier: NotGivenOr[str]
-    reasoning_effort: NotGivenOr[ReasoningEffort]
-    verbosity: NotGivenOr[Verbosity]
-    extra_body: NotGivenOr[dict[str, Any]]
-    extra_headers: NotGivenOr[dict[str, str]]
-    extra_query: NotGivenOr[dict[str, str]]
 
 
 class LLM(llm.LLM):
@@ -102,25 +85,14 @@ class LLM(llm.LLM):
         base_url: NotGivenOr[str] = NOT_GIVEN,
         client: openai.AsyncClient | None = None,
         user: NotGivenOr[str] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
         temperature: NotGivenOr[float] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         store: NotGivenOr[bool] = NOT_GIVEN,
         metadata: NotGivenOr[dict[str, str]] = NOT_GIVEN,
         max_completion_tokens: NotGivenOr[int] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
-        max_retries: NotGivenOr[int] = NOT_GIVEN,
-        service_tier: NotGivenOr[str] = NOT_GIVEN,
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        verbosity: NotGivenOr[Verbosity] = NOT_GIVEN,
-        extra_body: NotGivenOr[dict[str, Any]] = NOT_GIVEN,
-        extra_headers: NotGivenOr[dict[str, str]] = NOT_GIVEN,
-        extra_query: NotGivenOr[dict[str, str]] = NOT_GIVEN,
         _provider_fmt: NotGivenOr[str] = NOT_GIVEN,
-        _strict_tool_schema: bool = True,
         use_with_openai_llm: bool = False,
         level:int = 1
     ) -> None:
@@ -131,11 +103,6 @@ class LLM(llm.LLM):
         ``OPENAI_API_KEY`` environmental variable.
         """
         super().__init__()
-        if not is_given(reasoning_effort) and _supports_reasoning_effort(model):
-            if model == "gpt-5.1":
-                reasoning_effort = "none"  # type: ignore[assignment]
-            else:
-                reasoning_effort = "minimal"
         self.level = level
         self._opts = _LLMOptions(
             model=model,
@@ -146,18 +113,8 @@ class LLM(llm.LLM):
             store=store,
             metadata=metadata,
             max_completion_tokens=max_completion_tokens,
-            service_tier=service_tier,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
-            verbosity=verbosity,
-            extra_body=extra_body,
-            extra_headers=extra_headers,
-            extra_query=extra_query,
         )
         self._provider_fmt = _provider_fmt or "openai"
-        self._strict_tool_schema = _strict_tool_schema
         self._client = client or openai.AsyncClient(
             api_key=openai_api_key if is_given(openai_api_key) else None,
             base_url=base_url if is_given(base_url) else None,
@@ -198,10 +155,6 @@ class LLM(llm.LLM):
         """Get the model name for this LLM instance."""
         return self._opts.model
 
-    @property
-    def provider(self) -> str:
-        return self._client._base_url.netloc.decode("utf-8")
-
     @staticmethod
     def with_azure(
         *,
@@ -217,14 +170,10 @@ class LLM(llm.LLM):
         project: str | None = None,
         base_url: str | None = None,
         user: NotGivenOr[str] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
         use_with_openai_llm = False,
         level:int = 1
     ) -> LLM:
@@ -261,10 +210,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
             use_with_openai_llm=use_with_openai_llm,
             openai_api_key=openai_api_key,
             level = level,
@@ -273,7 +218,7 @@ class LLM(llm.LLM):
     @staticmethod
     def with_cerebras(
         *,
-        model: str | CerebrasChatModels = "llama-4-scout-17b-16e-instruct",
+        model: str | CerebrasChatModels = "llama3.1-8b",
         api_key: str | None = None,
         base_url: str = "https://api.cerebras.ai/v1",
         client: openai.AsyncClient | None = None,
@@ -281,10 +226,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of Cerebras LLM.
@@ -308,11 +249,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
-            _strict_tool_schema=False,
         )
 
     @staticmethod
@@ -326,10 +262,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of Fireworks LLM.
@@ -353,10 +285,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
         )
 
     @staticmethod
@@ -370,10 +298,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of XAI LLM.
@@ -397,82 +321,6 @@ class LLM(llm.LLM):
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
             # TODO(long): add provider fmt for grok
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
-        )
-
-    @staticmethod
-    def with_openrouter(
-        *,
-        model: str = "auto",
-        api_key: str | None = None,
-        base_url: str = "https://openrouter.ai/api/v1",
-        client: openai.AsyncClient | None = None,
-        site_url: str | None = None,
-        app_name: str | None = None,
-        fallback_models: list[str] | None = None,
-        provider: OpenRouterProviderPreferences | None = None,
-        plugins: list[OpenRouterWebPlugin] | None = None,
-        user: NotGivenOr[str] = NOT_GIVEN,
-        temperature: NotGivenOr[float] = NOT_GIVEN,
-        parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
-        tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
-        timeout: httpx.Timeout | None = None,
-    ) -> LLM:
-        """
-        Create a new instance of OpenRouter LLM.
-
-        ``api_key`` must be set to your OpenRouter API key, either using the argument or by setting
-        the ``OPENROUTER_API_KEY`` environment variable.
-        """
-
-        api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
-        if api_key is None:
-            raise ValueError(
-                "OpenRouter API key is required, either as argument or set OPENROUTER_API_KEY environment variable"
-            )
-
-        # Set up analytics headers for OpenRouter
-        default_headers: dict[str, str] = {}
-        if site_url:
-            default_headers["HTTP-Referer"] = site_url
-        if app_name:
-            default_headers["X-Title"] = app_name
-
-        # Build OpenRouter-specific request body
-        or_body: dict[str, Any] = {}
-        if provider:
-            or_body["provider"] = provider
-        if fallback_models:
-            # Set fallback models for routing
-            or_body["models"] = [model, *fallback_models]
-        if plugins:
-            or_body["plugins"] = [
-                {k: v for k, v in asdict(p).items() if v is not None} for p in plugins
-            ]
-
-        return LLM(
-            model=model,
-            api_key=api_key,
-            client=client,
-            base_url=base_url,
-            user=user,
-            temperature=temperature,
-            parallel_tool_calls=parallel_tool_calls,
-            tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
-            extra_body=or_body,
-            extra_headers=default_headers,
-            timeout=timeout,
         )
 
     @staticmethod
@@ -486,10 +334,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of DeepSeek LLM.
@@ -513,60 +357,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
-        )
-
-    @staticmethod
-    def with_cometapi(
-        *,
-        model: str | CometAPIChatModels = "gpt-5-chat-latest",
-        api_key: str | None = None,
-        base_url: str = "https://api.cometapi.com/v1/",
-        client: openai.AsyncClient | None = None,
-        user: NotGivenOr[str] = NOT_GIVEN,
-        temperature: NotGivenOr[float] = NOT_GIVEN,
-        parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
-        tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
-    ) -> LLM:
-        """
-        Create a new instance of CometAPI LLM.
-
-        ``api_key`` must be set to your CometAPI API key, either using the argument or by setting
-        the ``COMETAPI_API_KEY`` environmental variable.
-
-        CometAPI provides access to 500+ AI models from multiple providers including OpenAI,
-        Anthropic, Google, xAI, DeepSeek, and Qwen through a unified API.
-
-        Get your API key at: https://api.cometapi.com/console/token
-        Learn more: https://www.cometapi.com/?utm_source=livekit&utm_campaign=integration&utm_medium=integration&utm_content=integration
-        """
-
-        api_key = api_key or os.environ.get("COMETAPI_API_KEY")
-        if api_key is None:
-            raise ValueError(
-                "CometAPI API key is required, either as argument or set COMETAPI_API_KEY environmental variable"  # noqa: E501
-            )
-
-        return LLM(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            client=client,
-            user=user,
-            temperature=temperature,
-            parallel_tool_calls=parallel_tool_calls,
-            tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
         )
 
     @staticmethod
@@ -580,10 +370,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of OctoAI LLM.
@@ -607,10 +393,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
         )
 
     @staticmethod
@@ -622,10 +404,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of Ollama LLM.
@@ -639,54 +417,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
-        )
-
-    @staticmethod
-    def with_ovhcloud(
-        *,
-        model: str = "gpt-oss-120b",
-        api_key: str | None = None,
-        base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
-        client: openai.AsyncClient | None = None,
-        user: NotGivenOr[str] = NOT_GIVEN,
-        temperature: NotGivenOr[float] = NOT_GIVEN,
-        parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
-        tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
-    ) -> LLM:
-        """
-        Create a new instance of OVHcloud AI Endpoints LLM.
-
-        ``api_key`` must be set to your OVHcloud AI Endpoints API key, either using the argument or by setting
-        the ``OVHCLOUD_API_KEY`` environmental variable.
-        """
-
-        api_key = api_key or os.environ.get("OVHCLOUD_API_KEY")
-        if api_key is None:
-            raise ValueError(
-                "OVHcloud AI Endpoints API key is required, either as argument or set OVHCLOUD_API_KEY environmental variable"  # noqa: E501
-            )
-
-        return LLM(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            client=client,
-            user=user,
-            temperature=temperature,
-            parallel_tool_calls=parallel_tool_calls,
-            tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
         )
 
     @staticmethod
@@ -700,10 +430,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of PerplexityAI LLM.
@@ -727,10 +453,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
         )
 
     @staticmethod
@@ -744,10 +466,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of TogetherAI LLM.
@@ -771,10 +489,6 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
         )
 
     @staticmethod
@@ -788,10 +502,6 @@ class LLM(llm.LLM):
         temperature: NotGivenOr[float] = NOT_GIVEN,
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
     ) -> LLM:
         """
         Create a new instance of Telnyx LLM.
@@ -815,61 +525,13 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
-        )
-
-    @staticmethod
-    def with_nebius(
-        *,
-        model: str | NebiusChatModels = "meta-llama/Meta-Llama-3.1-70B-Instruct",
-        api_key: str | None = None,
-        base_url: str = "https://api.studio.nebius.com/v1/",
-        client: openai.AsyncClient | None = None,
-        user: NotGivenOr[str] = NOT_GIVEN,
-        temperature: NotGivenOr[float] = NOT_GIVEN,
-        parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
-        tool_choice: ToolChoice = "auto",
-        reasoning_effort: NotGivenOr[ReasoningEffort] = NOT_GIVEN,
-        safety_identifier: NotGivenOr[str] = NOT_GIVEN,
-        prompt_cache_key: NotGivenOr[str] = NOT_GIVEN,
-        top_p: NotGivenOr[float] = NOT_GIVEN,
-    ) -> LLM:
-        """
-        Create a new instance of Nebius LLM.
-
-        ``api_key`` must be set to your Nebius API key, either using the argument or by setting
-        the ``NEBIUS_API_KEY`` environmental variable.
-        """
-
-        api_key = api_key or os.environ.get("NEBIUS_API_KEY")
-        if api_key is None:
-            raise ValueError(
-                "Nebius API key is required, either as argument or set NEBIUS_API_KEY environmental variable"  # noqa: E501
-            )
-
-        return LLM(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            client=client,
-            user=user,
-            temperature=temperature,
-            parallel_tool_calls=parallel_tool_calls,
-            tool_choice=tool_choice,
-            reasoning_effort=reasoning_effort,
-            safety_identifier=safety_identifier,
-            prompt_cache_key=prompt_cache_key,
-            top_p=top_p,
         )
 
     @staticmethod
     def with_letta(
         *,
         agent_id: str,
-        base_url: str = "https://api.letta.com/v1/chat/completions",
+        base_url: str = "https://api.letta.com/v1/voice-beta",
         api_key: str | None = None,
     ) -> LLM:
         """
@@ -877,7 +539,7 @@ class LLM(llm.LLM):
 
         Args:
             agent_id (str): The Letta agent ID (must be prefixed with 'agent-').
-            base_url (str): The URL of the Letta server (e.g., http://localhost:8283/v1/chat/completions for local or https://api.letta.com/v1/chat/completions for cloud).
+            base_url (str): The URL of the Letta server (e.g., from ngrok or Letta Cloud).
             api_key (str | None, optional): Optional API key for authentication, required if
                                             the Letta server enforces auth.
 
@@ -885,6 +547,7 @@ class LLM(llm.LLM):
             LLM: A configured LLM instance for interacting with the given Letta agent.
         """
 
+        base_url = f"{base_url}/{agent_id}"
         parsed = urlparse(base_url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError(f"Invalid URL scheme: '{parsed.scheme}'. Must be 'http' or 'https'.")
@@ -898,7 +561,7 @@ class LLM(llm.LLM):
             )
 
         return LLM(
-            model=agent_id,
+            model="letta-fast",
             api_key=api_key,
             base_url=base_url,
             client=None,
@@ -925,15 +588,6 @@ class LLM(llm.LLM):
         if is_given(extra_kwargs):
             extra.update(extra_kwargs)
 
-        if is_given(self._opts.extra_body):
-            extra["extra_body"] = self._opts.extra_body
-
-        if is_given(self._opts.extra_headers):
-            extra["extra_headers"] = self._opts.extra_headers
-
-        if is_given(self._opts.extra_query):
-            extra["extra_query"] = self._opts.extra_query
-
         if is_given(self._opts.metadata):
             extra["metadata"] = self._opts.metadata
 
@@ -945,24 +599,6 @@ class LLM(llm.LLM):
 
         if is_given(self._opts.temperature):
             extra["temperature"] = self._opts.temperature
-
-        if is_given(self._opts.service_tier):
-            extra["service_tier"] = self._opts.service_tier
-
-        if is_given(self._opts.reasoning_effort):
-            extra["reasoning_effort"] = self._opts.reasoning_effort
-
-        if is_given(self._opts.safety_identifier):
-            extra["safety_identifier"] = self._opts.safety_identifier
-
-        if is_given(self._opts.prompt_cache_key):
-            extra["prompt_cache_key"] = self._opts.prompt_cache_key
-
-        if is_given(self._opts.top_p):
-            extra["top_p"] = self._opts.top_p
-
-        if is_given(self._opts.verbosity):
-            extra["verbosity"] = self._opts.verbosity
 
         parallel_tool_calls = (
             parallel_tool_calls if is_given(parallel_tool_calls) else self._opts.parallel_tool_calls
@@ -990,7 +626,6 @@ class LLM(llm.LLM):
             self,
             model=self._opts.model,
             provider_fmt=self._provider_fmt,
-            strict_tool_schema=self._strict_tool_schema,
             client=self._client,
             secondary_client=self._secondary_client,
             chat_ctx=chat_ctx,
@@ -1007,7 +642,6 @@ class LLMStream(llm.LLMStream):
         *,
         model: str | ChatModels,
         provider_fmt: str,
-        strict_tool_schema: bool,
         client: openai.AsyncClient,
         secondary_client: openai.AsyncClient,
         chat_ctx: llm.ChatContext,
@@ -1016,10 +650,9 @@ class LLMStream(llm.LLMStream):
         extra_kwargs: dict[str, Any]
     ) -> None:
         super().__init__(llm, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options)
-        self._model = model,
-        self._provider_fmt = provider_fmt,
+        self._model = model
+        self._provider_fmt = provider_fmt
         self._client = client
-        strict_tool_schema=strict_tool_schema,
         self._secondary_client = secondary_client
         self._llm = llm
         self._extra_kwargs = extra_kwargs

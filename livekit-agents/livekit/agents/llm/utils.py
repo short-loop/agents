@@ -12,7 +12,6 @@ from typing import (
     Any,
     Callable,
     Union,
-    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -135,12 +134,7 @@ class SerializedImage:
     external_url: str | None = None
 
 
-def serialize_image(image: ImageContent, *, use_cache: bool = True) -> SerializedImage:
-    cache_key = "serialized_image"  # TODO(long): use hash of encoding options if available
-    if use_cache and cache_key in image._cache:
-        return cast(SerializedImage, image._cache[cache_key])
-
-    serialized_image: SerializedImage
+def serialize_image(image: ImageContent) -> SerializedImage:
     if isinstance(image.image, str):
         if image.image.startswith("data:"):
             header, b64_data = image.image.split(",", 1)
@@ -160,13 +154,13 @@ def serialize_image(image: ImageContent, *, use_cache: bool = True) -> Serialize
                     f"Unsupported mime_type {mime_type}. Must be jpeg, png, webp, or gif"
                 )
 
-            serialized_image = SerializedImage(
+            return SerializedImage(
                 data_bytes=encoded_data,
                 mime_type=mime_type,
                 inference_detail=image.inference_detail,
             )
         else:
-            serialized_image = SerializedImage(
+            return SerializedImage(
                 mime_type=image.mime_type,
                 inference_detail=image.inference_detail,
                 external_url=image.image,
@@ -182,17 +176,12 @@ def serialize_image(image: ImageContent, *, use_cache: bool = True) -> Serialize
             )
         encoded_data = images.encode(image.image, opts)
 
-        serialized_image = SerializedImage(
+        return SerializedImage(
             data_bytes=encoded_data,
             mime_type="image/jpeg",
             inference_detail=image.inference_detail,
         )
-    else:
     raise ValueError("Unsupported image type")
-
-    if use_cache:
-        image._cache[cache_key] = serialized_image
-    return serialized_image
 
 
 def build_legacy_openai_schema(
@@ -418,7 +407,7 @@ def _is_optional_type(hint: Any) -> bool:
 
 def _shallow_model_dump(model: BaseModel, *, by_alias: bool = False) -> dict[str, Any]:
     result = {}
-    for name, field in model.__class__.model_fields.items():
+    for name, field in model.model_fields.items():
         key = field.alias if by_alias and field.alias else name
         result[key] = getattr(model, name)
     return result
