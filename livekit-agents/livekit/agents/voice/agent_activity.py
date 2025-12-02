@@ -1154,10 +1154,10 @@ class AgentActivity(RecognitionHooks):
         if self._interruption_history:
             last_entry = self._interruption_history[-1]
             if time.time() - last_entry.timestamp <= 15:
-                print(f"Last interruption was within 15 seconds.")
+                print("Last interruption was within 15 seconds.")
                 return True
             else:
-                print(f"Last interruption was more than 15 seconds ago.")
+                print("Last interruption was more than 15 seconds ago.")
         else:
             print("No interruption history.")
         return False
