@@ -1079,6 +1079,21 @@ class AgentActivity(RecognitionHooks):
                 self._interruption_history.append(history)
                 logger.debug("Interruption history: %s", self._interruption_history)
 
+    def interrupt_current_speech(self):
+        if (
+            self._current_speech is not None
+            and not self._current_speech.interrupted
+            and self._current_speech.allow_interruptions
+        ):
+            if self._rt_session is not None:
+                self._rt_session.interrupt()
+
+            self._current_speech.interrupt()
+            if self._session.agent_state == "speaking":
+                history = InterruptionHistory(timestamp=time.time())
+                self._interruption_history.append(history)
+                logger.debug("Interruption history: %s", self._interruption_history)
+
     def on_interim_transcript(self, ev: stt.SpeechEvent) -> None:
         if isinstance(self.llm, llm.RealtimeModel) and self.llm.capabilities.user_transcription:
             # skip stt transcription if user_transcription is enabled on the realtime model
@@ -1138,11 +1153,11 @@ class AgentActivity(RecognitionHooks):
     def is_bot_interrupted(self) -> bool:
         if self._interruption_history:
             last_entry = self._interruption_history[-1]
-            if time.time() - last_entry.timestamp <= 2:
-                print("Last interruption was within 2 seconds.")
+            if time.time() - last_entry.timestamp <= 15:
+                print("Last interruption was within 15 seconds.")
                 return True
             else:
-                print("Last interruption was more than 2 seconds ago.")
+                print("Last interruption was more than 15 seconds ago.")
         else:
             print("No interruption history.")
         return False
