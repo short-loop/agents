@@ -1152,7 +1152,7 @@ class AgentActivity(RecognitionHooks):
 
     def is_bot_interrupted(self) -> bool:
         if self._interruption_history:
-            wait_period = 5 if len(self._interruption_history) == 1 else 15
+            wait_period = 10 if len(self._interruption_history) == 1 else 15
             last_entry = self._interruption_history[-1]
             if time.time() - last_entry.timestamp <= wait_period:
                 print(f"Last interruption was within {wait_period} seconds.")
