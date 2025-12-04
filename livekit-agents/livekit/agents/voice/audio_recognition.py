@@ -514,8 +514,8 @@ class AudioRecognition:
                     self._audio_transcript = ""
                     asyncio.ensure_future(self._hooks.update_chat_ctx(chat_ctx))
                     return
-                logger.debug("Interrupting the bot now")
-                self._hooks.interrupt_current_speech()
+            logger.debug("Interrupting the bot now")
+            self._hooks.interrupt_current_speech()
         chat_ctx = chat_ctx.copy()
         chat_ctx.add_message(role="user", content=self._audio_transcript)
         turn_detector = (
