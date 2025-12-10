@@ -229,6 +229,7 @@ class AudioRecognition:
 
         self._speaking = False
         self._last_speaking_time: float = 0
+        self._ignore_last_speaking_time: bool = False
         self._last_final_transcript_time: float = 0
         self._second_last_final_transcript_time: float = 0
         self._final_transcript_received = asyncio.Event()
@@ -418,6 +419,7 @@ class AudioRecognition:
                 # the correct way is to ensure STT fires SpeechEventType.END_OF_SPEECH
                 # and using that timestamp for _last_speaking_time
                 self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = False
 
             if self._vad_base_turn_detection or self._user_turn_committed:
                 self._hooks.on_preemptive_generation(
@@ -437,6 +439,7 @@ class AudioRecognition:
                         logger.debug(
                             f"_last_speaking_time is lagging behind. {self._last_speaking_time}: {self._second_last_final_transcript_time}")
                         self._last_speaking_time = time.time()
+                        self._ignore_last_speaking_time = True
 
                 if not self._speaking:
                     chat_ctx = self._hooks.retrieve_chat_ctx().copy()
@@ -449,6 +452,7 @@ class AudioRecognition:
                 if self._last_speaking_time < self._second_last_final_transcript_time:
                     logger.debug(f"_last_speaking_time is lagging behind {self._last_speaking_time}: {self._second_last_final_transcript_time}")
                     self._last_speaking_time = time.time()
+                    self._ignore_last_speaking_time = True
 
 
         elif ev.type == stt.SpeechEventType.END_OF_SPEECH and self._turn_detection_mode == "stt":
@@ -466,6 +470,7 @@ class AudioRecognition:
 
             self._speaking = True
             self._last_speaking_time = time.time() - ev.speech_duration
+            self._ignore_last_speaking_time = False
 
             if self._end_of_turn_task is not None:
                 self._end_of_turn_task.cancel()
@@ -473,6 +478,7 @@ class AudioRecognition:
         elif ev.type == vad.VADEventType.INFERENCE_DONE:
             self._hooks.on_vad_inference_done(ev)
             self._last_speaking_time = time.time() - ev.silence_duration
+            self._ignore_last_speaking_time = False
 
         elif ev.type == vad.VADEventType.END_OF_SPEECH:
             with trace.use_span(self._ensure_user_turn_span()):
@@ -481,6 +487,7 @@ class AudioRecognition:
             self._speaking = False
             # when VAD fires END_OF_SPEECH, it already waited for the silence_duration
             self._last_speaking_time = time.time() - ev.silence_duration
+            self._ignore_last_speaking_time = False
             logger.debug("_last_speaking_time END_OF_SPEECH", extra={"speech_duration": self._last_speaking_time})
 
             if self._vad_base_turn_detection or (
@@ -525,14 +532,22 @@ class AudioRecognition:
         )
 
         @utils.log_exceptions(logger=logger)
-        async def _bounce_eou_task(last_speaking_time: float) -> None:
+        async def _bounce_eou_task(last_speaking_time: float, ignore_last_speaking_time: bool) -> None:
             endpointing_delay = self._min_endpointing_delay
             user_turn_span = self._ensure_user_turn_span()
+
+            def compute_sleep(primary_delay) -> float:
+                if ignore_last_speaking_time:
+                    logger.debug("_bounce_eou_task: ignoring last speaking time")
+                    return primary_delay
+                else:
+                    return last_speaking_time + primary_delay - time.time()
+
             extra_sleep = None
             if self._hooks.is_bot_interrupted():
                 endpointing_delay = self._interrupt_backoff
                 logger.debug("Recent Interrupt, backing off, endpointing_delay: %s", endpointing_delay)
-                extra_sleep = last_speaking_time + endpointing_delay - time.time()
+                extra_sleep = compute_sleep(endpointing_delay)
             elif ends_with_number_like(chat_ctx):
                 endpointing_delay = self._max_endpointing_delay
                 logger.debug("Ending with number, endpointing_delay: %s", endpointing_delay)
@@ -559,7 +574,7 @@ class AudioRecognition:
                         ):
                             endpointing_delay = self._max_endpointing_delay
                             logger.debug("endpointing_delay: %s", endpointing_delay)
-                            extra_sleep = last_speaking_time + endpointing_delay - time.time()
+                            extra_sleep = compute_sleep(endpointing_delay)
                         eou_detection_span.set_attributes(
                             {
                                 trace_types.ATTR_CHAT_CTX: json.dumps(
@@ -578,7 +593,7 @@ class AudioRecognition:
 
             if extra_sleep is None:
                 logger.debug("endpointing_delay: %s", endpointing_delay)
-                extra_sleep = last_speaking_time + endpointing_delay - time.time()
+                extra_sleep = compute_sleep(endpointing_delay)
             logger.debug("last_speaking_time: %s", last_speaking_time)
             if extra_sleep < 0:
                 logger.debug("extra_sleep is less than 0, defaulting to 0.6 sec: %s", extra_sleep)
@@ -631,7 +646,7 @@ class AudioRecognition:
             self._end_of_turn_task.cancel()
 
         # copy the last_speaking_time before awaiting (the value can change)
-        self._end_of_turn_task = asyncio.create_task(_bounce_eou_task(self._last_speaking_time))
+        self._end_of_turn_task = asyncio.create_task(_bounce_eou_task(self._last_speaking_time, self._ignore_last_speaking_time))
 
     @utils.log_exceptions(logger=logger)
     async def _stt_task(
