@@ -246,6 +246,7 @@ class AudioRecognition:
         self._user_turn_span: trace.Span | None = None
         self._bc_crutch_words = backchannel_crutch_words
         self._commit_crutch_words = commit_crutch_words
+        self._min_interruption_words = min_interruption_words
 
     def start(self) -> None:
         self.update_stt(self._stt)
