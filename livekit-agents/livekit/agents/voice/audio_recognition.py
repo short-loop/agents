@@ -208,7 +208,8 @@ class AudioRecognition:
         interrupt_backoff: float,
         turn_detection_mode: TurnDetectionMode | None,
         backchannel_crutch_words: list[str],
-        commit_crutch_words: list[str]
+        commit_crutch_words: list[str],
+        min_interruption_words: int = 1,
     ) -> None:
         self._hooks = hooks
         self._audio_input_atask: asyncio.Task[None] | None = None
@@ -521,8 +522,9 @@ class AudioRecognition:
                     self._audio_transcript = ""
                     asyncio.ensure_future(self._hooks.update_chat_ctx(chat_ctx))
                     return
-            logger.debug("Interrupting the bot now")
-            self._hooks.interrupt_current_speech()
+            if len(words) >= self._min_interruption_words:
+                logger.debug("Interrupting the bot now")
+                self._hooks.interrupt_current_speech()
         chat_ctx = chat_ctx.copy()
         chat_ctx.add_message(role="user", content=self._audio_transcript)
         turn_detector = (

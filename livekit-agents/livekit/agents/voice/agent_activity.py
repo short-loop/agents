@@ -489,7 +489,8 @@ class AgentActivity(RecognitionHooks):
             turn_detection_mode=self._turn_detection_mode,
             interrupt_backoff=self._interrupt_backoff,
             backchannel_crutch_words=self._bc_crutch_words,
-            commit_crutch_words=self._commit_crutch_words
+            commit_crutch_words=self._commit_crutch_words,
+            min_interruption_words=self._session.options.min_interruption_words
         )
         self._audio_recognition.start()
 
