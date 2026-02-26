@@ -1544,6 +1544,7 @@ class AgentActivity(RecognitionHooks):
         )
 
         if speech_handle.interrupted:
+            logger.info(f"Speech handle interrupted, cancelling tasks. Handle ID: {speech_handle.id}")
             current_span.set_attribute(trace_types.ATTR_SPEECH_INTERRUPTED, True)
             await utils.aio.cancel_and_wait(*tasks)
             await text_tee.aclose()
