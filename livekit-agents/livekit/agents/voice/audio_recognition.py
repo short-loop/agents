@@ -598,9 +598,9 @@ class AudioRecognition:
                 logger.debug("endpointing_delay: %s", endpointing_delay)
                 extra_sleep = compute_sleep(endpointing_delay)
             logger.debug("last_speaking_time: %s", last_speaking_time)
-            if extra_sleep < 0:
-                logger.debug("extra_sleep is less than 0, defaulting to 0.6 sec: %s", extra_sleep)
-                extra_sleep = 0.6
+            if extra_sleep < 0.5:
+                logger.debug("extra_sleep is less than 0.5, defaulting to 0.5 sec: %s", extra_sleep)
+                extra_sleep = 0.5
             logger.debug("extra_sleep: %s", extra_sleep)
             await asyncio.sleep(max(extra_sleep, 0))
 
