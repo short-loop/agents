@@ -268,7 +268,9 @@ class AudioRecognition:
         self._speaking = False
 
         self._last_final_transcript_time: float | None = None
+        self._second_last_final_transcript_time: float | None = None
         self._last_speaking_time: float | None = None
+        self._ignore_last_speaking_time: bool = False
         self._speech_start_time: float | None = None
 
         # used for manual commit_user_turn
@@ -546,6 +548,7 @@ class AudioRecognition:
                 extra["transcript_delay"] = time.time() - self._last_speaking_time
             logger.debug("received user transcript", extra=extra)
 
+            self._second_last_final_transcript_time = self._last_final_transcript_time
             self._last_final_transcript_time = time.time()
             self._audio_transcript += f" {transcript}"
             self._audio_transcript = self._audio_transcript.lstrip()
@@ -562,17 +565,18 @@ class AudioRecognition:
                 # the correct way is to ensure STT fires SpeechEventType.END_OF_SPEECH
                 # and using that timestamp for _last_speaking_time
                 self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = False
 
-            # Update _last_speaking_time if it's significantly stale relative to
-            # transcript time (e.g., missed VAD INFERENCE_DONE event).
-            # Only trigger for stale times > 2s to avoid false positives from
-            # normal event ordering differences.
+            # Detect stale _last_speaking_time: if VAD INFERENCE_DONE hasn't fired
+            # since the previous transcript, _last_speaking_time will be older than
+            # _second_last_final_transcript_time. Force-update and mark unreliable.
             if (
                 self._last_speaking_time is not None
-                and self._last_final_transcript_time is not None
-                and (self._last_final_transcript_time - self._last_speaking_time) > 2.0
+                and self._second_last_final_transcript_time is not None
+                and self._last_speaking_time < self._second_last_final_transcript_time
             ):
                 self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = True
 
             if self._vad_base_turn_detection or self._user_turn_committed:
                 if transcript_changed:
@@ -626,6 +630,16 @@ class AudioRecognition:
             if not self._vad or self._last_speaking_time is None:
                 # vad disabled, use stt timestamp
                 self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = False
+
+            # Detect stale _last_speaking_time (missed VAD INFERENCE_DONE)
+            if (
+                self._last_speaking_time is not None
+                and self._second_last_final_transcript_time is not None
+                and self._last_speaking_time < self._second_last_final_transcript_time
+            ):
+                self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = True
 
             if self._turn_detection_mode != "manual" or self._user_turn_committed:
                 confidence_vals = list(self._final_transcript_confidence) + [confidence]
@@ -679,12 +693,14 @@ class AudioRecognition:
                 self._hooks.on_start_of_speech(ev)
 
             self._speaking = True
+            self._ignore_last_speaking_time = False
 
             if self._end_of_turn_task is not None:
                 self._end_of_turn_task.cancel()
 
         elif ev.type == vad.VADEventType.INFERENCE_DONE:
             self._hooks.on_vad_inference_done(ev)
+            self._ignore_last_speaking_time = False
 
             # for metrics, get the "earliest" signal of speech as possible
             if ev.raw_accumulated_speech > 0.0:
@@ -698,6 +714,7 @@ class AudioRecognition:
                 self._hooks.on_end_of_speech(ev)
 
             self._speaking = False
+            self._ignore_last_speaking_time = False
 
             if self._vad_base_turn_detection or (
                 self._turn_detection_mode == "stt" and self._user_turn_committed
@@ -745,6 +762,7 @@ class AudioRecognition:
             last_speaking_time: float | None = None,
             last_final_transcript_time: float | None = None,
             speech_start_time: float | None = None,
+            ignore_last_speaking_time: bool = False,
         ) -> None:
             endpointing_delay = self._min_endpointing_delay
             user_turn_span = self._ensure_user_turn_span()
@@ -808,21 +826,14 @@ class AudioRecognition:
                         )
 
             extra_sleep = endpointing_delay
-            if last_speaking_time:
-                time_since_speaking = time.time() - last_speaking_time
-                staleness_threshold = max(endpointing_delay * 3, 2.0)
-                if time_since_speaking > staleness_threshold:
-                    # last_speaking_time is stale (e.g., missed INFERENCE_DONE)
-                    # Fall back to using last_final_transcript_time or raw delay
-                    logger.debug(
-                        "stale _last_speaking_time detected, using transcript time",
-                        extra={"time_since_speaking": time_since_speaking},
-                    )
-                    if last_final_transcript_time:
-                        extra_sleep += last_final_transcript_time - time.time()
-                    # else: just use raw endpointing_delay
-                else:
-                    extra_sleep += last_speaking_time - time.time()
+            if ignore_last_speaking_time:
+                # _last_speaking_time is unreliable (VAD INFERENCE_DONE likely missed),
+                # use raw endpointing_delay from now instead of anchoring to speaking time
+                logger.debug(
+                    "ignore_last_speaking_time set, using raw endpointing delay",
+                )
+            elif last_speaking_time:
+                extra_sleep += last_speaking_time - time.time()
 
             # Ensure a minimum sleep of 0.5s to avoid jumping in too quickly,
             # but only when the configured endpointing delay is >= 0.5s
@@ -894,12 +905,13 @@ class AudioRecognition:
             # TODO(theomonnom): disallow cancel if the extra sleep is done
             self._end_of_turn_task.cancel()
 
-        # copy the last_speaking_time before awaiting (the value can change)
+        # copy the values before awaiting (they can change)
         self._end_of_turn_task = asyncio.create_task(
             _bounce_eou_task(
                 self._last_speaking_time,
                 self._last_final_transcript_time,
                 self._speech_start_time,
+                self._ignore_last_speaking_time,
             )
         )
 

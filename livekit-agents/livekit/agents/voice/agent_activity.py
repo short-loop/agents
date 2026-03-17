@@ -1284,15 +1284,22 @@ class AgentActivity(RecognitionHooks):
             # ignore if realtime model has turn detection enabled
             return
 
-        if (
-            self.stt is not None
-            and opt.min_interruption_words > 0
-            and self._audio_recognition is not None
-        ):
+        if self.stt is not None and self._audio_recognition is not None:
             text = self._audio_recognition.current_transcript
+            words = split_words(text, split_character=True)
+
+            # Backchannel word check: if it's a single backchannel word while bot is
+            # speaking, block the interrupt (e.g. "okay", "mhm", "uh-huh")
+            if (
+                self.is_bot_speaking()
+                and len(words) == 1
+                and self._audio_recognition.is_backchannel_word(words[0][0])
+                and not self._audio_recognition.is_commit_word(words[0][0])
+            ):
+                return
 
             # TODO(long): better word splitting for multi-language
-            if len(split_words(text, split_character=True)) < opt.min_interruption_words:
+            if opt.min_interruption_words > 0 and len(words) < opt.min_interruption_words:
                 return
 
         if self._rt_session is not None:
