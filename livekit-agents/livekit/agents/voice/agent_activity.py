@@ -308,10 +308,10 @@ class AgentActivity(RecognitionHooks):
         return (time.time() - self._last_interrupt_time) < 3.0
 
     @property
-    def last_user_language(self) -> LanguageCode | None:
+    def get_last_user_language(self) -> LanguageCode | None:
         if self._audio_recognition is None:
             return None
-        return self._audio_recognition.last_user_language
+        return self._audio_recognition.get_last_user_language
 
     @property
     def tools(

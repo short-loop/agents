@@ -497,7 +497,7 @@ class AudioRecognition:
         return self._audio_transcript
 
     @property
-    def last_user_language(self) -> LanguageCode | None:
+    def get_last_user_language(self) -> LanguageCode | None:
         return self._last_language
 
     def is_backchannel_word(self, word: str) -> bool:

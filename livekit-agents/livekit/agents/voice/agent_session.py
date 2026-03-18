@@ -500,10 +500,10 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         return self._tools
 
     @property
-    def last_user_language(self) -> LanguageCode | None:
+    def get_last_user_language(self) -> LanguageCode | None:
         if self._activity is None:
             return None
-        return self._activity.last_user_language
+        return self._activity.get_last_user_language
 
     def run(
         self,
