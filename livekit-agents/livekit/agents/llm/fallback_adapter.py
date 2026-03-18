@@ -5,7 +5,7 @@ import dataclasses
 import time
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 from .._exceptions import APIConnectionError, APIError
 from ..log import logger
@@ -32,7 +32,12 @@ class AvailabilityChangedEvent:
 
 
 class FallbackAdapter(
-    LLM[Literal["llm_availability_changed"]],
+    LLM[
+        Union[
+            Literal["llm_availability_changed"],
+            Literal["llm_incoming_function_call"]
+        ]
+    ],
 ):
     def __init__(
         self,
@@ -56,6 +61,15 @@ class FallbackAdapter(
         self._status = [
             _LLMStatus(available=True, recovering_task=None) for _ in self._llm_instances
         ]
+
+        for llm in self._llm_instances:
+            llm.on("llm_incoming_function_call", self._on_llm_function_call_incoming)
+
+    def _on_llm_function_call_incoming(self, *args):
+        self.emit(
+            "llm_incoming_function_call",
+            *args,
+        )
 
     def chat(
         self,

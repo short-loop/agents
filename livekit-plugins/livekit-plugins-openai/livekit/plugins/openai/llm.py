@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -57,6 +58,11 @@ from .utils import AsyncAzureADTokenProvider, to_fnc_ctx
 
 lk_oai_debug = int(os.getenv("LK_OPENAI_DEBUG", 0))
 
+@dataclass
+class IncomingFunctionCallEvent:
+    llm: LLM
+    tool_id: str
+    function_name: str
 
 @dataclass
 class _LLMOptions:
@@ -75,7 +81,7 @@ class LLM(llm.LLM):
         self,
         *,
         model: str | ChatModels = "gpt-4o",
-        api_key: NotGivenOr[str] = NOT_GIVEN,
+        openai_api_key: NotGivenOr[str] = NOT_GIVEN,
         base_url: NotGivenOr[str] = NOT_GIVEN,
         client: openai.AsyncClient | None = None,
         user: NotGivenOr[str] = NOT_GIVEN,
@@ -87,6 +93,8 @@ class LLM(llm.LLM):
         max_completion_tokens: NotGivenOr[int] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
         _provider_fmt: NotGivenOr[str] = NOT_GIVEN,
+        use_with_openai_llm: bool = False,
+        level:int = 1
     ) -> None:
         """
         Create a new instance of OpenAI LLM.
@@ -95,6 +103,7 @@ class LLM(llm.LLM):
         ``OPENAI_API_KEY`` environmental variable.
         """
         super().__init__()
+        self.level = level
         self._opts = _LLMOptions(
             model=model,
             user=user,
@@ -107,7 +116,25 @@ class LLM(llm.LLM):
         )
         self._provider_fmt = _provider_fmt or "openai"
         self._client = client or openai.AsyncClient(
-            api_key=api_key if is_given(api_key) else None,
+            api_key=openai_api_key if is_given(openai_api_key) else None,
+            base_url=base_url if is_given(base_url) else None,
+            max_retries=0,
+            http_client=httpx.AsyncClient(
+                timeout=timeout
+                if timeout
+                else httpx.Timeout(connect=15.0, read=5.0, write=5.0, pool=5.0),
+                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_connections=50,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=120,
+                ),
+            ),
+        )
+        self._secondary_client = None
+        if use_with_openai_llm == True and is_given(openai_api_key) is not None:
+            self._secondary_client = openai.AsyncClient(
+            api_key=openai_api_key if is_given(openai_api_key) else None,
             base_url=base_url if is_given(base_url) else None,
             max_retries=0,
             http_client=httpx.AsyncClient(
@@ -134,8 +161,9 @@ class LLM(llm.LLM):
         model: str | ChatModels = "gpt-4o",
         azure_endpoint: str | None = None,
         azure_deployment: str | None = None,
-        api_version: str | None = None,
-        api_key: str | None = None,
+        azure_api_version: str | None = None,
+        azure_api_key: str | None = None,
+        openai_api_key: str | None = None,
         azure_ad_token: str | None = None,
         azure_ad_token_provider: AsyncAzureADTokenProvider | None = None,
         organization: str | None = None,
@@ -146,6 +174,8 @@ class LLM(llm.LLM):
         parallel_tool_calls: NotGivenOr[bool] = NOT_GIVEN,
         tool_choice: NotGivenOr[ToolChoice] = NOT_GIVEN,
         timeout: httpx.Timeout | None = None,
+        use_with_openai_llm = False,
+        level:int = 1
     ) -> LLM:
         """
         This automatically infers the following arguments from their corresponding environment variables if they are not provided:
@@ -161,8 +191,8 @@ class LLM(llm.LLM):
             max_retries=0,
             azure_endpoint=azure_endpoint,
             azure_deployment=azure_deployment,
-            api_version=api_version,
-            api_key=api_key,
+            api_version=azure_api_version,
+            api_key=azure_api_key,
             azure_ad_token=azure_ad_token,
             azure_ad_token_provider=azure_ad_token_provider,
             organization=organization,
@@ -180,6 +210,9 @@ class LLM(llm.LLM):
             temperature=temperature,
             parallel_tool_calls=parallel_tool_calls,
             tool_choice=tool_choice,
+            use_with_openai_llm=use_with_openai_llm,
+            openai_api_key=openai_api_key,
+            level = level,
         )
 
     @staticmethod
@@ -594,10 +627,11 @@ class LLM(llm.LLM):
             model=self._opts.model,
             provider_fmt=self._provider_fmt,
             client=self._client,
+            secondary_client=self._secondary_client,
             chat_ctx=chat_ctx,
             tools=tools or [],
             conn_options=conn_options,
-            extra_kwargs=extra,
+            extra_kwargs=extra
         )
 
 
@@ -609,17 +643,62 @@ class LLMStream(llm.LLMStream):
         model: str | ChatModels,
         provider_fmt: str,
         client: openai.AsyncClient,
+        secondary_client: openai.AsyncClient,
         chat_ctx: llm.ChatContext,
         tools: list[FunctionTool | RawFunctionTool],
         conn_options: APIConnectOptions,
-        extra_kwargs: dict[str, Any],
+        extra_kwargs: dict[str, Any]
     ) -> None:
         super().__init__(llm, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options)
         self._model = model
         self._provider_fmt = provider_fmt
         self._client = client
+        self._secondary_client = secondary_client
         self._llm = llm
         self._extra_kwargs = extra_kwargs
+
+    async def _stream_with_first_chunk(self, stream_id, messages, fnc_ctx):
+        start = time.time()
+        client_in_use = self._client
+        if stream_id > 1 and self._secondary_client is not None:
+            logger.info("Using secondary client")
+            client_in_use = self._secondary_client
+        else:
+            logger.info("Using primary client")
+        stream = await client_in_use.chat.completions.create(
+            messages=messages,
+            model=self._model,
+            tools = fnc_ctx,
+            stream_options = {"include_usage": True},
+            stream = True,
+            timeout = httpx.Timeout(self._conn_options.timeout),
+            ** self._extra_kwargs
+        )
+        iterator = stream.__aiter__()
+        first_chunk = await iterator.__anext__()
+        logger.debug(f"stream {stream_id} with ttfb {time.time() - start}")
+        return stream_id, stream, iterator, first_chunk
+
+    async def _parallel_inference(self, messages, fnc_ctx):
+        # task1 = asyncio.create_task(self._stream_with_first_chunk(1, messages, fnc_ctx))
+        # task2 = asyncio.create_task(self._stream_with_first_chunk(2, messages, fnc_ctx))
+        hedge_level = self._llm.level if isinstance(self._llm.level, int) and self._llm.level > 0 else 1
+        logger.info(f"starting parallel inference with {hedge_level} hedging")
+        task_list = []
+        for i in range(hedge_level):
+            task_list.append(asyncio.create_task(self._stream_with_first_chunk(i+1, messages, fnc_ctx)))
+
+        done, pending = await asyncio.wait(
+            task_list,
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        fastest = done.pop().result()
+
+        for task in pending:
+            task.cancel()
+
+        return fastest
+
 
     async def _run(self) -> None:
         # current function call that we're waiting for full completion (args are streamed)
@@ -633,7 +712,7 @@ class LLMStream(llm.LLMStream):
 
         try:
             chat_ctx, _ = self._chat_ctx.to_provider_format(format=self._provider_fmt)
-            fnc_ctx = to_fnc_ctx(self._tools) if self._tools else openai.NOT_GIVEN
+            fnc_ctx = to_fnc_ctx(self._tools) if self._tools else []
             if lk_oai_debug:
                 tool_choice = self._extra_kwargs.get("tool_choice", NOT_GIVEN)
                 logger.debug(
@@ -645,21 +724,49 @@ class LLMStream(llm.LLMStream):
                     },
                 )
 
-            self._oai_stream = stream = await self._client.chat.completions.create(
-                messages=cast(list[ChatCompletionMessageParam], chat_ctx),
-                tools=fnc_ctx,
-                model=self._model,
-                stream_options={"include_usage": True},
-                stream=True,
-                timeout=httpx.Timeout(self._conn_options.timeout),
-                **self._extra_kwargs,
-            )
-
             thinking = asyncio.Event()
+            logger.info("starting parallel inference")
+            logger.info(f"Hitting {self._llm.level} requests for hedging")
+            start_inference = time.time()
+            stream_id, stream, iterator, first_chunk = await self._parallel_inference(cast(list[ChatCompletionMessageParam], chat_ctx), fnc_ctx)
+            logger.debug(f"using llm stream {stream_id}")
+
+            discarded_buffer: str = ""
+            discard_flag = False
+
+            # for first chunk
+            for choice in first_chunk.choices:
+                chat_chunk, discarded_str = self._parse_choice(first_chunk.id, choice, thinking)
+                if discarded_str is not None and len(discarded_str.strip()) > 0:
+                    discard_flag = True
+                    discarded_buffer = discarded_buffer + discarded_str
+                logger.info(f"sending first chunk by {time.time() - start_inference}")
+                if chat_chunk is not None:
+                    retryable = False
+                    logger.info(f"sending first chunk {chat_chunk} by {time.time() - start_inference}")
+                    self._event_ch.send_nowait(chat_chunk)
+
+            if first_chunk.usage is not None:
+                usage = first_chunk.usage
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(
+                        id=first_chunk.id,
+                        usage=llm.CompletionUsage(
+                            completion_tokens=usage.completion_tokens,
+                            prompt_tokens=usage.prompt_tokens,
+                            total_tokens=usage.total_tokens,
+                        ),
+                    )
+                )
+
             async with stream:
                 async for chunk in stream:
                     for choice in chunk.choices:
-                        chat_chunk = self._parse_choice(chunk.id, choice, thinking)
+                        chat_chunk, discarded_str = self._parse_choice(chunk.id, choice, thinking, discard_flag)
+                        if discarded_str is not None:
+                            discard_flag = True
+                            discarded_buffer = discarded_buffer + discarded_str
+
                         if chat_chunk is not None:
                             retryable = False
                             self._event_ch.send_nowait(chat_chunk)
@@ -693,14 +800,13 @@ class LLMStream(llm.LLMStream):
             raise APIConnectionError(retryable=retryable) from e
 
     def _parse_choice(
-        self, id: str, choice: Choice, thinking: asyncio.Event
-    ) -> llm.ChatChunk | None:
+        self, _id: str, choice: Choice, thinking: asyncio.Event, discard = False) -> tuple[llm.ChatChunk | None, str | None]:
         delta = choice.delta
 
         # https://github.com/livekit/agents/issues/688
         # the delta can be None when using Azure OpenAI (content filtering)
         if delta is None:
-            return None
+            return None, None
 
         if delta.tool_calls:
             for tool in delta.tool_calls:
@@ -710,7 +816,7 @@ class LLMStream(llm.LLMStream):
                 call_chunk = None
                 if self._tool_call_id and tool.id and tool.index != self._tool_index:
                     call_chunk = llm.ChatChunk(
-                        id=id,
+                        id=_id,
                         delta=llm.ChoiceDelta(
                             role="assistant",
                             content=delta.content,
@@ -730,15 +836,20 @@ class LLMStream(llm.LLMStream):
                     self._tool_call_id = tool.id
                     self._fnc_name = tool.function.name
                     self._fnc_raw_arguments = tool.function.arguments or ""
+                    self._llm.emit("llm_incoming_function_call", IncomingFunctionCallEvent(
+                        llm=self._llm,
+                        tool_id=tool.id,
+                        function_name=tool.function.name,
+                    ))
                 elif tool.function.arguments:
                     self._fnc_raw_arguments += tool.function.arguments  # type: ignore
 
                 if call_chunk is not None:
-                    return call_chunk
+                    return call_chunk, None
 
         if choice.finish_reason in ("tool_calls", "stop") and self._tool_call_id:
             call_chunk = llm.ChatChunk(
-                id=id,
+                id=_id,
                 delta=llm.ChoiceDelta(
                     role="assistant",
                     content=delta.content,
@@ -752,14 +863,27 @@ class LLMStream(llm.LLMStream):
                 ),
             )
             self._tool_call_id = self._fnc_name = self._fnc_raw_arguments = None
-            return call_chunk
+            return call_chunk, None
 
-        delta.content = llm_utils.strip_thinking_tokens(delta.content, thinking)
+        content = llm_utils.strip_thinking_tokens(delta.content, thinking)
 
-        if not delta.content:
-            return None
+        if discard:
+            logger.debug(f"discarding content: {delta.content}")
+            return None, delta.content
+
+        discarded: str | None = None
+        if delta.content is not None:
+            original_content = content  # Preserve the original value of content
+            res = content.find('[')
+            if res != -1:
+                content = content[0:res]
+                discarded = discarded or "" + original_content[res:]
+                logger.debug(f"discarding content: {discarded}")
+
+        if content is None or len(content) == 0:
+            return None, discarded
 
         return llm.ChatChunk(
-            id=id,
-            delta=llm.ChoiceDelta(content=delta.content, role="assistant"),
-        )
+            id=_id,
+            delta=llm.ChoiceDelta(content=content, role="assistant")
+        ), discarded
