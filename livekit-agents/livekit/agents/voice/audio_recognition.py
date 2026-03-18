@@ -543,6 +543,9 @@ class AudioRecognition:
                 if ignore_last_speaking_time:
                     logger.debug("_bounce_eou_task: ignoring last speaking time")
                     return primary_delay
+                elif last_speaking_time + primary_delay - time.time() < 0:
+                    logger.debug("Suspecting last_speaking_time isn't updated, defaulting to primary_delay")
+                    return primary_delay
                 else:
                     return last_speaking_time + primary_delay - time.time()
 
