@@ -767,13 +767,15 @@ class AudioRecognition:
             endpointing_delay = self._min_endpointing_delay
             user_turn_span = self._ensure_user_turn_span()
 
-            # Prioritized endpointing delay overrides
+            use_raw_delay = False
             if self._hooks.recently_interrupted():
                 endpointing_delay = self._session.options.interrupt_backoff
             elif _ends_with_number_like(self._audio_transcript):
                 endpointing_delay = self._max_endpointing_delay
+                use_raw_delay = True
             elif _ends_with_alpha_numeric(self._audio_transcript):
                 endpointing_delay = self._max_endpointing_delay - 1.0
+                use_raw_delay = True
             elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.info("Turn detector does not support language %s", self._last_language)
@@ -825,15 +827,26 @@ class AudioRecognition:
                             }
                         )
 
-            extra_sleep = endpointing_delay
-            if ignore_last_speaking_time:
-                # _last_speaking_time is unreliable (VAD INFERENCE_DONE likely missed),
-                # use raw endpointing_delay from now instead of anchoring to speaking time
-                logger.debug(
-                    "ignore_last_speaking_time set, using raw endpointing delay",
-                )
-            elif last_speaking_time:
-                extra_sleep += last_speaking_time - time.time()
+            def compute_sleep(primary_delay: float) -> float:
+                if ignore_last_speaking_time:
+                    logger.debug(
+                        "ignore_last_speaking_time set, using raw endpointing delay",
+                    )
+                    return primary_delay
+                elif (
+                    last_speaking_time
+                    and last_speaking_time + primary_delay - time.time() < 0
+                ):
+                    logger.debug(
+                        "last_speaking_time appears stale, defaulting to raw endpointing delay",
+                    )
+                    return primary_delay
+                elif last_speaking_time:
+                    return last_speaking_time + primary_delay - time.time()
+                else:
+                    return primary_delay
+
+            extra_sleep = endpointing_delay if use_raw_delay else compute_sleep(endpointing_delay)
 
             # Ensure a minimum sleep of 0.5s to avoid jumping in too quickly,
             # but only when the configured endpointing delay is >= 0.5s

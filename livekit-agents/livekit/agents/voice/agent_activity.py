@@ -130,6 +130,7 @@ class AgentActivity(RecognitionHooks):
 
         # for interrupt backoff
         self._last_interrupt_time: float | None = None
+        self._interruption_history: list[float] = []
 
         self._stt_eos_received: bool = False
 
@@ -308,7 +309,7 @@ class AgentActivity(RecognitionHooks):
     def recently_interrupted(self) -> bool:
         if self._last_interrupt_time is None:
             return False
-        return (time.time() - self._last_interrupt_time) < self._session.options.interrupt_backoff
+        return (time.time() - self._last_interrupt_time) < 3.0
 
     @property
     def last_user_language(self) -> LanguageCode | None:
@@ -1024,6 +1025,11 @@ class AgentActivity(RecognitionHooks):
         """
         self._cancel_preemptive_generation()
         self._last_interrupt_time = time.time()
+        self._interruption_history.append(self._last_interrupt_time)
+        logger.debug(
+            "interrupt recorded",
+            extra={"total_interruptions": len(self._interruption_history)},
+        )
 
         future = asyncio.Future[None]()
 
