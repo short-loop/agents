@@ -300,11 +300,7 @@ class AgentActivity(RecognitionHooks):
         return self._current_speech
 
     def is_bot_speaking(self) -> bool:
-        return (
-            self._current_speech is not None
-            and not self._current_speech.interrupted
-            and not self._current_speech.done()
-        )
+        return self._session.agent_state == "speaking"
 
     def recently_interrupted(self) -> bool:
         if self._last_interrupt_time is None:
