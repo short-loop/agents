@@ -130,7 +130,6 @@ async def _llm_inference_task(
             elif isinstance(chunk, ChatChunk):
                 if not chunk.delta:
                     continue
-
                 if chunk.delta.tool_calls:
                     for tool in chunk.delta.tool_calls:
                         if tool.type != "function":
@@ -146,8 +145,8 @@ async def _llm_inference_task(
                         function_ch.send_nowait(fnc_call)
 
                 if chunk.delta.content:
-                    data.generated_text += chunk.delta.content
-                    text_ch.send_nowait(chunk.delta.content)
+                        data.generated_text += chunk.delta.content
+                        text_ch.send_nowait(chunk.delta.content)
             else:
                 logger.warning(
                     f"LLM node returned an unexpected type: {type(chunk)}",

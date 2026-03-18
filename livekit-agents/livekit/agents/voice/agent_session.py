@@ -150,6 +150,9 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         min_interruption_words: int = 0,
         min_endpointing_delay: float = 0.5,
         max_endpointing_delay: float = 6.0,
+        interrupt_backoff: float = 3.0,
+        backchannel_crutch_words: NotGivenOr[list[str]] = NOT_GIVEN,
+        commit_crutch_words: NotGivenOr[list[str]] = NOT_GIVEN,
         max_tool_steps: int = 3,
         video_sampler: NotGivenOr[_VideoSampler | None] = NOT_GIVEN,
         user_away_timeout: float | None = 15.0,
@@ -300,7 +303,9 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self._job_context_cb_registered: bool = False
 
         self._global_run_state: RunResult | None = None
-
+        self._interrupt_backoff = interrupt_backoff
+        self._bc_crutch_words = backchannel_crutch_words if is_given(backchannel_crutch_words) else []
+        self._commit_crutch_words = commit_crutch_words if is_given(commit_crutch_words) else []
         # trace
         self._user_speaking_span: trace.Span | None = None
         self._agent_speaking_span: trace.Span | None = None
@@ -349,6 +354,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
     @property
     def current_speech(self) -> SpeechHandle | None:
         return self._activity.current_speech if self._activity is not None else None
+
+    def get_last_user_language(self) -> Language | None:
+        if self._activity is None:
+            return None
+        return self._activity.get_last_user_language()
 
     @property
     def user_state(self) -> UserState:

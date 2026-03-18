@@ -80,6 +80,9 @@ class _PreemptiveGeneration:
     tool_choice: llm.ToolChoice | None
     created_at: float
 
+@dataclass
+class InterruptionHistory:
+    timestamp: float
 
 # NOTE: AgentActivity isn't exposed to the public API
 class AgentActivity(RecognitionHooks):
@@ -95,6 +98,7 @@ class AgentActivity(RecognitionHooks):
         self._scheduling_paused = True
 
         self._current_speech: SpeechHandle | None = None
+        self._interruption_history: list[InterruptionHistory] = []
         self._speech_q: list[tuple[int, float, SpeechHandle]] = []
 
         # fired when a speech_task finishes or when a new speech_handle is scheduled
@@ -106,7 +110,9 @@ class AgentActivity(RecognitionHooks):
         self._speech_tasks: list[asyncio.Task[Any]] = []
 
         self._preemptive_generation: _PreemptiveGeneration | None = None
-
+        self._interrupt_backoff = self._session._interrupt_backoff
+        self._bc_crutch_words = self._session._bc_crutch_words
+        self._commit_crutch_words = self._session._commit_crutch_words
         self._turn_detection_mode = (
             self.turn_detection if isinstance(self.turn_detection, str) else None
         )
@@ -481,6 +487,10 @@ class AgentActivity(RecognitionHooks):
             min_endpointing_delay=self._session.options.min_endpointing_delay,
             max_endpointing_delay=self._session.options.max_endpointing_delay,
             turn_detection_mode=self._turn_detection_mode,
+            interrupt_backoff=self._interrupt_backoff,
+            backchannel_crutch_words=self._bc_crutch_words,
+            commit_crutch_words=self._commit_crutch_words,
+            min_interruption_words=self._session.options.min_interruption_words
         )
         self._audio_recognition.start()
 
@@ -788,6 +798,7 @@ class AgentActivity(RecognitionHooks):
             An asyncio.Future that completes when the interruption is fully processed
             and chat context has been updated
         """
+        logger.debug("Interrupting speech generation inside agent activity")
         self._cancel_preemptive_generation()
 
         future = asyncio.Future[None]()
@@ -868,6 +879,7 @@ class AgentActivity(RecognitionHooks):
             await self._q_updated.wait()
             while self._speech_q:
                 _, _, speech = heapq.heappop(self._speech_q)
+                logger.debug("Setting _current_speech to Value 1")
                 self._current_speech = speech
                 if self.min_consecutive_speech_delay > 0.0:
                     await asyncio.sleep(
@@ -875,6 +887,7 @@ class AgentActivity(RecognitionHooks):
                     )
                 speech._authorize_generation()
                 await speech._wait_for_generation()
+                logger.debug("Setting _current_speech to None 1")
                 self._current_speech = None
                 last_playout_ts = time.time()
 
@@ -1034,6 +1047,22 @@ class AgentActivity(RecognitionHooks):
             ):
                 return
 
+            ####
+            if self.is_bot_speaking():
+                # Split into words by whitespace
+                words = text.strip().split()
+                if len(words) == 1:
+                    word = words[0]
+                    if self._audio_recognition.is_backchannel_word(word):
+                        logger.debug("vad_inference: user side backchanneling crutch word found, not interrupting",
+                                     extra={"word": word})
+                        return
+
+                    if self._audio_recognition.is_commit_word(word):
+                        logger.debug("vad_inference: user side commit crutch word found, not interrupting",
+                                     extra={"word": word})
+                        return
+
         if self._rt_session is not None:
             self._rt_session.start_user_activity()
 
@@ -1046,6 +1075,25 @@ class AgentActivity(RecognitionHooks):
                 self._rt_session.interrupt()
 
             self._current_speech.interrupt()
+            if self._session.agent_state == "speaking":
+                history = InterruptionHistory(timestamp=time.time())
+                self._interruption_history.append(history)
+                logger.debug("Interruption history: %s", self._interruption_history)
+
+    def interrupt_current_speech(self):
+        if (
+            self._current_speech is not None
+            and not self._current_speech.interrupted
+            and self._current_speech.allow_interruptions
+        ):
+            if self._rt_session is not None:
+                self._rt_session.interrupt()
+
+            self._current_speech.interrupt()
+            if self._session.agent_state == "speaking":
+                history = InterruptionHistory(timestamp=time.time())
+                self._interruption_history.append(history)
+                logger.debug("Interruption history: %s", self._interruption_history)
 
     def on_interim_transcript(self, ev: stt.SpeechEvent) -> None:
         if isinstance(self.llm, llm.RealtimeModel) and self.llm.capabilities.user_transcription:
@@ -1102,6 +1150,26 @@ class AgentActivity(RecognitionHooks):
             tool_choice=self._tool_choice,
             created_at=time.time(),
         )
+
+    def is_bot_interrupted(self) -> bool:
+        if self._interruption_history:
+            last_entry = self._interruption_history[-1]
+            if time.time() - last_entry.timestamp < 3:
+                logger.debug("Last interruption was within 3 seconds.")
+                return True
+            else:
+                logger.debug("Last interruption was more than 3 seconds ago.")
+        else:
+            print("No interruption history.")
+        return False
+
+    def is_bot_speaking(self) -> bool:
+        return self._session.agent_state == "speaking"
+
+    def get_last_user_language(self) -> str:
+        if self._audio_recognition is None:
+            return None
+        return self._audio_recognition.get_last_user_language()
 
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool:
         # IMPORTANT: This method is sync to avoid it being cancelled by the AudioRecognition
@@ -1476,6 +1544,7 @@ class AgentActivity(RecognitionHooks):
         )
 
         if speech_handle.interrupted:
+            logger.info(f"Speech handle interrupted, cancelling tasks. Handle ID: {speech_handle.id}")
             current_span.set_attribute(trace_types.ATTR_SPEECH_INTERRUPTED, True)
             await utils.aio.cancel_and_wait(*tasks)
             await text_tee.aclose()
@@ -1562,6 +1631,7 @@ class AgentActivity(RecognitionHooks):
             self._agent._chat_ctx.insert(_tools_messages)
 
         if speech_handle.interrupted:
+            logger.debug("Speech handle interrupted...")
             await utils.aio.cancel_and_wait(*tasks)
             await text_tee.aclose()
 
