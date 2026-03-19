@@ -6,6 +6,7 @@ from typing import Any, ClassVar
 
 from .._exceptions import APIConnectionError
 from ..log import logger
+from ..metrics import LLMMetrics
 from ..types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, APIConnectOptions, NotGivenOr
 from ..utils import aio
 from .chat_context import ChatContext
@@ -42,6 +43,7 @@ class ParallelAdapter(LLM):
 
         self._llm_instances = llm
         self._attempt_timeout = attempt_timeout
+        self._winning_request_ids: set[str] = set()
 
         for llm_instance in self._llm_instances:
             llm_instance.on("metrics_collected", self._on_metrics_collected)
@@ -78,8 +80,9 @@ class ParallelAdapter(LLM):
         for llm_instance in self._llm_instances:
             llm_instance.off("metrics_collected", self._on_metrics_collected)
 
-    def _on_metrics_collected(self, *args: Any, **kwargs: Any) -> None:
-        self.emit("metrics_collected", *args, **kwargs)
+    def _on_metrics_collected(self, metrics: LLMMetrics) -> None:
+        metrics.parallel_selected = metrics.request_id in self._winning_request_ids
+        self.emit("metrics_collected", metrics)
 
 
 class ParallelLLMStream(LLMStream):
@@ -118,10 +121,11 @@ class ParallelLLMStream(LLMStream):
 
     async def _run(self) -> None:
         winner_index: int | None = None
+        winning_request_id: str | None = None
         chunk_ch = aio.Chan[ChatChunk]()
 
         async def _race_llm(index: int, llm_instance: LLM) -> None:
-            nonlocal winner_index
+            nonlocal winner_index, winning_request_id
             try:
                 async with llm_instance.chat(
                     chat_ctx=self._chat_ctx,
@@ -143,9 +147,9 @@ class ParallelLLMStream(LLMStream):
                                 llm_instance.label,
                             )
                         if winner_index == index:
+                            winning_request_id = chunk.id
                             chunk_ch.send_nowait(chunk)
                         else:
-                            # Another LLM won the race, stop
                             return
             except Exception as e:
                 if winner_index is None:
@@ -185,7 +189,13 @@ class ParallelLLMStream(LLMStream):
                 if i != winner_index and not task.done():
                     task.cancel()
 
+            if winning_request_id:
+                self._parallel_adapter._winning_request_ids.add(winning_request_id)
+
             await asyncio.gather(*tasks, return_exceptions=True)
+
+            if winning_request_id:
+                self._parallel_adapter._winning_request_ids.discard(winning_request_id)
 
     async def _metrics_monitor_task(self, event_aiter: AsyncIterable[ChatChunk]) -> None:
         return

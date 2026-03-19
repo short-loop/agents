@@ -1313,6 +1313,7 @@ class AgentActivity(RecognitionHooks):
             and self._current_speech.allow_interruptions
         ):
             self._paused_speech = self._current_speech
+            self._last_interrupt_time = time.time()
 
             # reset the false interruption timer
             if self._false_interruption_timer:
