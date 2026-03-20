@@ -729,7 +729,7 @@ class AudioRecognition:
 
         # Crutch word detection when bot is speaking
         if self._hooks.is_bot_speaking():
-            words = self._audio_transcript.strip().split()
+            words = self.current_transcript.strip().split()
             if len(words) == 1:
                 word = words[0]
                 if self.is_backchannel_word(word):
@@ -744,6 +744,7 @@ class AudioRecognition:
                         "commit word detected, adding to context",
                         extra={"word": word},
                     )
+                    # this might break with real-time models
                     self._hooks.retrieve_chat_ctx().items.append(
                         llm.ChatMessage(role="user", content=[self._audio_transcript])
                     )
