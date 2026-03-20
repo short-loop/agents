@@ -853,7 +853,7 @@ class AudioRecognition:
 
             # Ensure a minimum sleep of 0.5s to avoid jumping in too quickly,
             # but only when the configured endpointing delay is >= 0.5s
-            if self._min_endpointing_delay >= 0.5 and extra_sleep < 0.5:
+            if self._min_endpointing_delay >= 0.5 > extra_sleep:
                 extra_sleep = 0.5
 
             logger.debug(
