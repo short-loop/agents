@@ -473,6 +473,12 @@ class LLMStream(llm.LLMStream):
 
         delta.content = llm_utils.strip_thinking_tokens(delta.content, thinking)
 
+        # Strip bracket artifacts (e.g. citation markers like [1], [source])
+        if delta.content:
+            bracket_pos = delta.content.find("[")
+            if bracket_pos != -1:
+                delta.content = delta.content[:bracket_pos]
+
         # Extract extra from delta (e.g., Google thought signatures on text parts)
         delta_extra = getattr(delta, "extra_content", None)
 

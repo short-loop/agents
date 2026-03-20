@@ -26,7 +26,7 @@ from .agent import ModelSettings
 if TYPE_CHECKING:
     from .agent_session import AgentSession
 
-MIN_LANGUAGE_DETECTION_LENGTH = 5
+MIN_LANGUAGE_DETECTION_LENGTH = 3
 # Mirrors turn_detector.base.MAX_HISTORY_TURNS for tracing
 _EOU_MAX_HISTORY_TURNS = 6
 
@@ -744,8 +744,9 @@ class AudioRecognition:
                         "commit word detected, adding to context",
                         extra={"word": word},
                     )
-                    commit_ctx = self._hooks.retrieve_chat_ctx().copy()
-                    commit_ctx.add_message(role="user", content=self._audio_transcript)
+                    self._hooks.retrieve_chat_ctx().items.append(
+                        llm.ChatMessage(role="user", content=[self._audio_transcript])
+                    )
                     self._audio_transcript = ""
                     return
 
@@ -833,10 +834,7 @@ class AudioRecognition:
                         "ignore_last_speaking_time set, using raw endpointing delay",
                     )
                     return primary_delay
-                elif (
-                    last_speaking_time
-                    and last_speaking_time + primary_delay - time.time() < 0
-                ):
+                elif last_speaking_time and last_speaking_time + primary_delay - time.time() < 0:
                     logger.debug(
                         "last_speaking_time appears stale, defaulting to raw endpointing delay",
                     )
