@@ -769,14 +769,18 @@ class AudioRecognition:
             user_turn_span = self._ensure_user_turn_span()
 
             use_raw_delay = False
+            delay_reason = "default"
             if self._hooks.recently_interrupted():
                 endpointing_delay = self._session.options.interrupt_backoff
+                delay_reason = "interrupt_backoff"
             elif _ends_with_number_like(self._audio_transcript):
                 endpointing_delay = self._max_endpointing_delay
                 use_raw_delay = True
+                delay_reason = "ends_with_number"
             elif _ends_with_alpha_numeric(self._audio_transcript):
                 endpointing_delay = self._max_endpointing_delay - 1.0
                 use_raw_delay = True
+                delay_reason = "ends_with_alphanumeric"
             elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.info("Turn detector does not support language %s", self._last_language)
@@ -800,6 +804,7 @@ class AudioRecognition:
                                 and end_of_turn_probability < unlikely_threshold
                             ):
                                 endpointing_delay = self._max_endpointing_delay
+                                delay_reason = "eou_unlikely"
                         except Exception:
                             logger.exception("Error predicting end of turn")
 
@@ -848,8 +853,20 @@ class AudioRecognition:
 
             # Ensure a minimum sleep of 0.5s to avoid jumping in too quickly,
             # but only when the configured endpointing delay is >= 0.5s
-            if self._min_endpointing_delay >= 0.5 and 0 < extra_sleep < 0.5:
+            if self._min_endpointing_delay >= 0.5 and extra_sleep < 0.5:
                 extra_sleep = 0.5
+
+            logger.debug(
+                "eou sleep",
+                extra={
+                    "delay": round(extra_sleep, 3),
+                    "reason": delay_reason,
+                    "endpointing_delay": endpointing_delay,
+                    "last_speaking_time": last_speaking_time,
+                    "use_raw_delay": use_raw_delay,
+                    "ignore_last_speaking_time": ignore_last_speaking_time,
+                },
+            )
 
             if extra_sleep > 0:
                 try:
