@@ -857,7 +857,7 @@ class AudioRecognition:
             if self._min_endpointing_delay >= 0.5 > extra_sleep:
                 extra_sleep = 0.5
 
-            logger.debug(
+            logger.info(
                 "eou sleep",
                 extra={
                     "delay": round(extra_sleep, 3),
