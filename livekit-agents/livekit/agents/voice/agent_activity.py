@@ -16,6 +16,7 @@ from livekit.agents.llm.realtime import MessageGeneration
 from livekit.agents.metrics.base import Metadata
 
 from .. import llm, stt, tts, utils, vad
+from ..language import LanguageCode
 from ..llm.chat_context import Instructions
 from ..llm.tool_context import (
     FunctionToolInfo,
@@ -126,6 +127,10 @@ class AgentActivity(RecognitionHooks):
         self._paused_speech: SpeechHandle | None = None
         self._false_interruption_timer: asyncio.TimerHandle | None = None
         self._cancel_speech_pause_task: asyncio.Task[None] | None = None
+
+        # for interrupt backoff
+        self._last_interrupt_time: float | None = None
+        self._interruption_history: list[float] = []
 
         self._stt_eos_received: bool = False
 
@@ -293,6 +298,20 @@ class AgentActivity(RecognitionHooks):
     @property
     def current_speech(self) -> SpeechHandle | None:
         return self._current_speech
+
+    def is_bot_speaking(self) -> bool:
+        return self._session.agent_state == "speaking"
+
+    def recently_interrupted(self) -> bool:
+        if self._last_interrupt_time is None:
+            return False
+        return (time.time() - self._last_interrupt_time) < 3.0
+
+    @property
+    def get_last_user_language(self) -> LanguageCode | None:
+        if self._audio_recognition is None:
+            return None
+        return self._audio_recognition.get_last_user_language
 
     @property
     def tools(
@@ -623,6 +642,8 @@ class AgentActivity(RecognitionHooks):
             min_endpointing_delay=self.min_endpointing_delay,
             max_endpointing_delay=self.max_endpointing_delay,
             turn_detection=self._turn_detection,
+            backchannel_words=self._session.options.backchannel_words,
+            commit_words=self._session.options.commit_words,
         )
         self._audio_recognition.start()
 
@@ -999,6 +1020,12 @@ class AgentActivity(RecognitionHooks):
             and chat context has been updated
         """
         self._cancel_preemptive_generation()
+        self._last_interrupt_time = time.time()
+        self._interruption_history.append(self._last_interrupt_time)
+        logger.debug(
+            "interrupt recorded",
+            extra={"total_interruptions": len(self._interruption_history)},
+        )
 
         future = asyncio.Future[None]()
 
@@ -1006,6 +1033,10 @@ class AgentActivity(RecognitionHooks):
 
         if self._current_speech is not None:
             self._current_speech.interrupt(force=force)
+            logger.debug(
+                "Speech handle interrupted, cancelling tasks",
+                extra={"handle_id": self._current_speech.id},
+            )
             interrupted_speeches.append(self._current_speech)
 
         for _, _, speech in self._speech_q:
@@ -1255,15 +1286,22 @@ class AgentActivity(RecognitionHooks):
             # ignore if realtime model has turn detection enabled
             return
 
-        if (
-            self.stt is not None
-            and opt.min_interruption_words > 0
-            and self._audio_recognition is not None
-        ):
+        if self.stt is not None and self._audio_recognition is not None:
             text = self._audio_recognition.current_transcript
+            words = split_words(text, split_character=True)
+
+            # Backchannel word check: if it's a single backchannel word while bot is
+            # speaking, block the interrupt (e.g. "okay", "mhm", "uh-huh")
+            if (
+                self.is_bot_speaking()
+                and len(words) == 1
+                and self._audio_recognition.is_backchannel_word(words[0][0])
+                and not self._audio_recognition.is_commit_word(words[0][0])
+            ):
+                return
 
             # TODO(long): better word splitting for multi-language
-            if len(split_words(text, split_character=True)) < opt.min_interruption_words:
+            if opt.min_interruption_words > 0 and len(words) < opt.min_interruption_words:
                 return
 
         if self._rt_session is not None:
@@ -1275,6 +1313,7 @@ class AgentActivity(RecognitionHooks):
             and self._current_speech.allow_interruptions
         ):
             self._paused_speech = self._current_speech
+            self._last_interrupt_time = time.time()
 
             # reset the false interruption timer
             if self._false_interruption_timer:

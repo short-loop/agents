@@ -348,6 +348,10 @@ class LLMStream(llm.LLMStream):
                 # remove tool_choice from extra_kwargs if no tools are provided
                 self._extra_kwargs.pop("tool_choice", None)
 
+            if not self._tools or len(self._tools) == 0:
+                # if no tools, remove parallel_tool_calls since it may cause errors with providers (e.g. Azure OpenAI)
+                self._extra_kwargs.pop("parallel_tool_calls", None)
+
             if self._provider:
                 headers = self._extra_kwargs.setdefault("extra_headers", {})
                 headers["X-LiveKit-Inference-Provider"] = self._provider
@@ -468,6 +472,12 @@ class LLMStream(llm.LLMStream):
             return call_chunk
 
         delta.content = llm_utils.strip_thinking_tokens(delta.content, thinking)
+
+        # Strip bracket artifacts (e.g. citation markers like [1], [source])
+        if delta.content:
+            bracket_pos = delta.content.find("[")
+            if bracket_pos != -1:
+                delta.content = delta.content[:bracket_pos]
 
         # Extract extra from delta (e.g., Google thought signatures on text parts)
         delta_extra = getattr(delta, "extra_content", None)

@@ -25,6 +25,8 @@ class LLMMetrics(BaseModel):
     tokens_per_second: float
     speech_id: str | None = None
     metadata: Metadata | None = None
+    parallel_selected: bool | None = None
+    """None when not from a ParallelAdapter, True for the winning stream, False for losing streams."""
 
 
 class STTMetrics(BaseModel):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from collections.abc import AsyncIterable
 from dataclasses import dataclass
@@ -25,9 +26,143 @@ from .agent import ModelSettings
 if TYPE_CHECKING:
     from .agent_session import AgentSession
 
-MIN_LANGUAGE_DETECTION_LENGTH = 5
+MIN_LANGUAGE_DETECTION_LENGTH = 3
 # Mirrors turn_detector.base.MAX_HISTORY_TURNS for tracing
 _EOU_MAX_HISTORY_TURNS = 6
+
+# --- Crutch word / backchannel detection ---
+
+_STRIP_PATTERN = re.compile(r"[\W_]+")
+
+
+def _strip_word(word: str) -> str:
+    return _STRIP_PATTERN.sub("", word.lower().strip())
+
+
+DEFAULT_BACKCHANNEL_WORDS: set[str] = {
+    "",
+    "uh",
+    "um",
+    "ugh",
+    "uhh",
+    "oof",
+    "aye",
+    "hi",
+    "hello",
+    "okay",
+    "ok",
+    "yes",
+    "yeah",
+    "ya",
+    "sure",
+    "yep",
+    "yup",
+    "hm",
+    "hmm",
+    "hmmm",
+    "hmmmm",
+    "mm",
+    "mhm",
+    "mmhmm",
+    "mhmm",
+    "mhmmm",
+    "mmhmmm",
+    "mmmhmm",
+    "uhuh",
+    "uhhuh",
+    "huh",
+    "eh",
+    "ah",
+    "aah",
+    "aaah",
+}
+
+_STRIPPED_BACKCHANNEL_WORDS: set[str] = {_strip_word(w) for w in DEFAULT_BACKCHANNEL_WORDS}
+
+# --- Endpointing pattern detection ---
+
+_NUMBER_WORDS = {
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+}
+
+_NUMBER_WORDS_EXTENDED = _NUMBER_WORDS | {"ten"}
+
+_MILITARY_LETTERS = {
+    "alpha",
+    "bravo",
+    "charlie",
+    "delta",
+    "echo",
+    "foxtrot",
+    "golf",
+    "hotel",
+    "india",
+    "juliett",
+    "kilo",
+    "lima",
+    "mike",
+    "november",
+    "oscar",
+    "papa",
+    "quebec",
+    "romeo",
+    "sierra",
+    "tango",
+    "uniform",
+    "victor",
+    "whiskey",
+    "yankee",
+    "zulu",
+}
+
+
+def _ends_with_number_like(transcript: str) -> bool:
+    """Returns True if transcript ends with 2+ consecutive number words."""
+    try:
+        words = transcript.rstrip(".,!?").lower().split()
+        count = 0
+        for word in reversed(words):
+            if word.isdigit() or word in _NUMBER_WORDS:
+                count += 1
+                if count >= 2:
+                    return True
+            else:
+                break
+        return False
+    except Exception:
+        logger.exception("Error in _ends_with_number_like")
+        return False
+
+
+def _ends_with_alpha_numeric(transcript: str) -> bool:
+    """Returns True if transcript ends with 4+ words forming an alphanumeric sequence."""
+    try:
+        words = transcript.rstrip(".,!?").lower().split()
+        if len(words) < 4:
+            return False
+        last_four = words[-4:]
+
+        def is_num(w: str) -> bool:
+            return w.isdigit() or w in _NUMBER_WORDS_EXTENDED
+
+        def is_char(w: str) -> bool:
+            return (len(w) == 1 and w.isalpha()) or w in _MILITARY_LETTERS
+
+        if not all(is_num(w) or is_char(w) for w in last_four):
+            return False
+        return any(is_num(w) for w in last_four)
+    except Exception:
+        logger.exception("Error in _ends_with_alpha_numeric")
+        return False
 
 
 @dataclass
@@ -93,6 +228,8 @@ class RecognitionHooks(Protocol):
     def on_final_transcript(self, ev: stt.SpeechEvent, *, speaking: bool | None = None) -> None: ...
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool: ...
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
+    def is_bot_speaking(self) -> bool: ...
+    def recently_interrupted(self) -> bool: ...
 
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
 
@@ -108,6 +245,8 @@ class AudioRecognition:
         turn_detection: TurnDetectionMode | None,
         min_endpointing_delay: float,
         max_endpointing_delay: float,
+        backchannel_words: set[str] | None = None,
+        commit_words: set[str] | None = None,
     ) -> None:
         self._session = session
         self._hooks = hooks
@@ -129,7 +268,9 @@ class AudioRecognition:
         self._speaking = False
 
         self._last_final_transcript_time: float | None = None
+        self._second_last_final_transcript_time: float | None = None
         self._last_speaking_time: float | None = None
+        self._ignore_last_speaking_time: bool = False
         self._speech_start_time: float | None = None
 
         # used for manual commit_user_turn
@@ -144,6 +285,9 @@ class AudioRecognition:
         self._stt_ch: aio.Chan[rtc.AudioFrame] | None = None
         self._vad_ch: aio.Chan[rtc.AudioFrame] | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
+
+        self._backchannel_words = backchannel_words
+        self._commit_words = commit_words
 
         self._user_turn_span: trace.Span | None = None
         self._closing = asyncio.Event()
@@ -352,6 +496,20 @@ class AudioRecognition:
             return self._audio_transcript + " " + self._audio_interim_transcript
         return self._audio_transcript
 
+    @property
+    def get_last_user_language(self) -> LanguageCode | None:
+        return self._last_language
+
+    def is_backchannel_word(self, word: str) -> bool:
+        w = _strip_word(word)
+        words = self._backchannel_words or _STRIPPED_BACKCHANNEL_WORDS
+        return w in words
+
+    def is_commit_word(self, word: str) -> bool:
+        if not self._commit_words:
+            return False
+        return _strip_word(word) in self._commit_words
+
     async def _on_stt_event(self, ev: stt.SpeechEvent) -> None:
         if (
             self._turn_detection_mode == "manual"
@@ -390,6 +548,7 @@ class AudioRecognition:
                 extra["transcript_delay"] = time.time() - self._last_speaking_time
             logger.debug("received user transcript", extra=extra)
 
+            self._second_last_final_transcript_time = self._last_final_transcript_time
             self._last_final_transcript_time = time.time()
             self._audio_transcript += f" {transcript}"
             self._audio_transcript = self._audio_transcript.lstrip()
@@ -406,6 +565,18 @@ class AudioRecognition:
                 # the correct way is to ensure STT fires SpeechEventType.END_OF_SPEECH
                 # and using that timestamp for _last_speaking_time
                 self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = False
+
+            # Detect stale _last_speaking_time: if VAD INFERENCE_DONE hasn't fired
+            # since the previous transcript, _last_speaking_time will be older than
+            # _second_last_final_transcript_time. Force-update and mark unreliable.
+            if (
+                self._last_speaking_time is not None
+                and self._second_last_final_transcript_time is not None
+                and self._last_speaking_time < self._second_last_final_transcript_time
+            ):
+                self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = True
 
             if self._vad_base_turn_detection or self._user_turn_committed:
                 if transcript_changed:
@@ -459,6 +630,16 @@ class AudioRecognition:
             if not self._vad or self._last_speaking_time is None:
                 # vad disabled, use stt timestamp
                 self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = False
+
+            # Detect stale _last_speaking_time (missed VAD INFERENCE_DONE)
+            if (
+                self._last_speaking_time is not None
+                and self._second_last_final_transcript_time is not None
+                and self._last_speaking_time < self._second_last_final_transcript_time
+            ):
+                self._last_speaking_time = time.time()
+                self._ignore_last_speaking_time = True
 
             if self._turn_detection_mode != "manual" or self._user_turn_committed:
                 confidence_vals = list(self._final_transcript_confidence) + [confidence]
@@ -512,12 +693,14 @@ class AudioRecognition:
                 self._hooks.on_start_of_speech(ev)
 
             self._speaking = True
+            self._ignore_last_speaking_time = False
 
             if self._end_of_turn_task is not None:
                 self._end_of_turn_task.cancel()
 
         elif ev.type == vad.VADEventType.INFERENCE_DONE:
             self._hooks.on_vad_inference_done(ev)
+            self._ignore_last_speaking_time = False
 
             # for metrics, get the "earliest" signal of speech as possible
             if ev.raw_accumulated_speech > 0.0:
@@ -531,6 +714,7 @@ class AudioRecognition:
                 self._hooks.on_end_of_speech(ev)
 
             self._speaking = False
+            self._ignore_last_speaking_time = False
 
             if self._vad_base_turn_detection or (
                 self._turn_detection_mode == "stt" and self._user_turn_committed
@@ -542,6 +726,30 @@ class AudioRecognition:
         if self._stt and not self._audio_transcript and self._turn_detection_mode != "manual":
             # stt enabled but no transcript yet
             return
+
+        # Crutch word detection when bot is speaking
+        if self._hooks.is_bot_speaking():
+            words = self.current_transcript.strip().split()
+            if len(words) == 1:
+                word = words[0]
+                if self.is_backchannel_word(word):
+                    logger.debug(
+                        "backchannel word detected, ignoring",
+                        extra={"word": word},
+                    )
+                    self._audio_transcript = ""
+                    return
+                if self.is_commit_word(word):
+                    logger.debug(
+                        "commit word detected, adding to context",
+                        extra={"word": word},
+                    )
+                    # this might break with real-time models
+                    self._hooks.retrieve_chat_ctx().items.append(
+                        llm.ChatMessage(role="user", content=[self._audio_transcript])
+                    )
+                    self._audio_transcript = ""
+                    return
 
         chat_ctx = chat_ctx.copy()
         chat_ctx.add_message(role="user", content=self._audio_transcript)
@@ -556,10 +764,25 @@ class AudioRecognition:
             last_speaking_time: float | None = None,
             last_final_transcript_time: float | None = None,
             speech_start_time: float | None = None,
+            ignore_last_speaking_time: bool = False,
         ) -> None:
             endpointing_delay = self._min_endpointing_delay
             user_turn_span = self._ensure_user_turn_span()
-            if turn_detector is not None:
+
+            use_raw_delay = False
+            delay_reason = "default"
+            if self._hooks.recently_interrupted():
+                endpointing_delay = self._session.options.interrupt_backoff
+                delay_reason = "interrupt_backoff"
+            elif _ends_with_number_like(self._audio_transcript):
+                endpointing_delay = self._max_endpointing_delay
+                use_raw_delay = True
+                delay_reason = "ends_with_number"
+            elif _ends_with_alpha_numeric(self._audio_transcript):
+                endpointing_delay = self._max_endpointing_delay - 1.0
+                use_raw_delay = True
+                delay_reason = "ends_with_alphanumeric"
+            elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.info("Turn detector does not support language %s", self._last_language)
                 else:
@@ -582,6 +805,7 @@ class AudioRecognition:
                                 and end_of_turn_probability < unlikely_threshold
                             ):
                                 endpointing_delay = self._max_endpointing_delay
+                                delay_reason = "eou_unlikely"
                         except Exception:
                             logger.exception("Error predicting end of turn")
 
@@ -610,9 +834,40 @@ class AudioRecognition:
                             }
                         )
 
-            extra_sleep = endpointing_delay
-            if last_speaking_time:
-                extra_sleep += last_speaking_time - time.time()
+            def compute_sleep(primary_delay: float) -> float:
+                if ignore_last_speaking_time:
+                    logger.debug(
+                        "ignore_last_speaking_time set, using raw endpointing delay",
+                    )
+                    return primary_delay
+                elif last_speaking_time and last_speaking_time + primary_delay - time.time() < 0:
+                    logger.debug(
+                        "last_speaking_time appears stale, defaulting to raw endpointing delay",
+                    )
+                    return primary_delay
+                elif last_speaking_time:
+                    return last_speaking_time + primary_delay - time.time()
+                else:
+                    return primary_delay
+
+            extra_sleep = endpointing_delay if use_raw_delay else compute_sleep(endpointing_delay)
+
+            # Ensure a minimum sleep of 0.5s to avoid jumping in too quickly,
+            # but only when the configured endpointing delay is >= 0.5s
+            if self._min_endpointing_delay >= 0.5 > extra_sleep:
+                extra_sleep = 0.5
+
+            logger.info(
+                "eou sleep",
+                extra={
+                    "delay": round(extra_sleep, 3),
+                    "reason": delay_reason,
+                    "endpointing_delay": endpointing_delay,
+                    "last_speaking_time": last_speaking_time,
+                    "use_raw_delay": use_raw_delay,
+                    "ignore_last_speaking_time": ignore_last_speaking_time,
+                },
+            )
 
             if extra_sleep > 0:
                 try:
@@ -682,12 +937,13 @@ class AudioRecognition:
             # TODO(theomonnom): disallow cancel if the extra sleep is done
             self._end_of_turn_task.cancel()
 
-        # copy the last_speaking_time before awaiting (the value can change)
+        # copy the values before awaiting (they can change)
         self._end_of_turn_task = asyncio.create_task(
             _bounce_eou_task(
                 self._last_speaking_time,
                 self._last_final_transcript_time,
                 self._speech_start_time,
+                self._ignore_last_speaking_time,
             )
         )
 
