@@ -39,6 +39,13 @@ def _strip_word(word: str) -> str:
     return _STRIP_PATTERN.sub("", word.lower().strip())
 
 
+def _log_task_exception(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "error updating chat context", exc_info=task.exception()
+        )
+
+
 DEFAULT_BACKCHANNEL_WORDS: set[str] = {
     "",
     "uh",
@@ -232,6 +239,7 @@ class RecognitionHooks(Protocol):
     def recently_interrupted(self) -> bool: ...
 
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
+    async def update_chat_ctx(self, chat_ctx: llm.ChatContext) -> None: ...
 
 
 class AudioRecognition:
@@ -744,10 +752,18 @@ class AudioRecognition:
                         "commit word detected, adding to context",
                         extra={"word": word},
                     )
-                    # this might break with real-time models
-                    self._hooks.retrieve_chat_ctx().items.append(
-                        llm.ChatMessage(role="user", content=[self._audio_transcript])
+                    new_ctx = self._hooks.retrieve_chat_ctx().copy()
+                    new_ctx.add_message(
+                        role="user",
+                        content=self._audio_transcript
                     )
+
+                    # TODO: FIX - this might break with real-time models
+                    task = asyncio.create_task(
+                        self._hooks.update_chat_ctx(new_ctx),
+                        name="audio_recognition_update_chat_ctx",
+                    )
+                    task.add_done_callback(_log_task_exception)
                     self._audio_transcript = ""
                     return
 
