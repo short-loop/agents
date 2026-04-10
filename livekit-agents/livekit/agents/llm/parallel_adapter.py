@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from .._exceptions import APIConnectionError
@@ -14,6 +15,14 @@ from .llm import LLM, ChatChunk, LLMStream
 from .tool_context import Tool, ToolChoice
 
 
+@dataclass
+class ParallelLLMEntry:
+    """An LLM instance with a label for use in :class:`ParallelAdapter`."""
+
+    llm: LLM
+    label: str
+
+
 class ParallelAdapter(LLM):
     """Sends the same request to multiple LLMs in parallel and returns the first response.
 
@@ -23,30 +32,33 @@ class ParallelAdapter(LLM):
 
     def __init__(
         self,
-        llm: list[LLM],
+        llm: list[ParallelLLMEntry],
         *,
         attempt_timeout: float = 10.0,
     ) -> None:
         """Create a ParallelAdapter.
 
         Args:
-            llm: List of LLM instances to race against each other.
+            llm: List of :class:`ParallelLLMEntry` items, each pairing an LLM instance
+                with a label used for logging and metrics identification.
             attempt_timeout: Timeout for each individual LLM attempt. Defaults to 10.0.
 
         Raises:
-            ValueError: If fewer than 2 LLM instances are provided.
+            ValueError: If fewer than 2 entries are provided.
         """
         if len(llm) < 2:
-            raise ValueError("at least two LLM instances must be provided for parallel inference.")
+            raise ValueError("at least two LLM entries must be provided for parallel inference.")
 
         super().__init__()
 
-        self._llm_instances = llm
+        self._entries = llm
+        for entry in self._entries:
+            entry.llm._label = entry.label
         self._attempt_timeout = attempt_timeout
         self._winning_request_ids: set[str] = set()
 
-        for llm_instance in self._llm_instances:
-            llm_instance.on("metrics_collected", self._on_metrics_collected)
+        for entry in self._entries:
+            entry.llm.on("metrics_collected", self._on_metrics_collected)
 
     @property
     def model(self) -> str:
@@ -77,11 +89,13 @@ class ParallelAdapter(LLM):
         )
 
     async def aclose(self) -> None:
-        for llm_instance in self._llm_instances:
-            llm_instance.off("metrics_collected", self._on_metrics_collected)
+        for entry in self._entries:
+            entry.llm.off("metrics_collected", self._on_metrics_collected)
 
     def _on_metrics_collected(self, metrics: LLMMetrics) -> None:
-        metrics.parallel_selected = metrics.request_id in self._winning_request_ids
+        if metrics.request_id not in self._winning_request_ids:
+            return
+        metrics.parallel_selected = True
         self.emit("metrics_collected", metrics)
 
 
@@ -124,6 +138,8 @@ class ParallelLLMStream(LLMStream):
         winning_request_id: str | None = None
         chunk_ch = aio.Chan[ChatChunk]()
 
+        tasks: list[asyncio.Task[None]] = []
+
         async def _race_llm(index: int, llm_instance: LLM) -> None:
             nonlocal winner_index, winning_request_id
             try:
@@ -146,6 +162,10 @@ class ParallelLLMStream(LLMStream):
                                 "llm.ParallelAdapter: %s won the race",
                                 llm_instance.label,
                             )
+                            # cancel all other tasks immediately
+                            for i, t in enumerate(tasks):
+                                if i != index and not t.done():
+                                    t.cancel()
                         if winner_index == index:
                             winning_request_id = chunk.id
                             chunk_ch.send_nowait(chunk)
@@ -159,21 +179,25 @@ class ParallelLLMStream(LLMStream):
                         exc_info=e,
                     )
 
-        tasks = [
+        tasks.extend(
             asyncio.create_task(
                 _race_llm(i, llm_instance),
                 name=f"ParallelAdapter._race_llm_{llm_instance.label}",
             )
-            for i, llm_instance in enumerate(self._parallel_adapter._llm_instances)
-        ]
+            for i, llm_instance in enumerate(
+                entry.llm for entry in self._parallel_adapter._entries
+            )
+        )
 
-        def _on_all_done(*_: Any) -> None:
-            # Close the channel when all tasks are done (winner finished or all failed)
-            if all(t.done() for t in tasks):
+        def _on_done(*_: Any) -> None:
+            # Close the channel when the winner finishes or all tasks fail
+            if (winner_index is not None and tasks[winner_index].done()) or all(
+                t.done() for t in tasks
+            ):
                 chunk_ch.close()
 
         for t in tasks:
-            t.add_done_callback(_on_all_done)
+            t.add_done_callback(_on_done)
 
         try:
             async for chunk in chunk_ch:
@@ -182,7 +206,7 @@ class ParallelLLMStream(LLMStream):
             if winner_index is None:
                 raise APIConnectionError(
                     "all LLMs failed in parallel "
-                    f"({[llm.label for llm in self._parallel_adapter._llm_instances]})"
+                    f"({[entry.label for entry in self._parallel_adapter._entries]})"
                 )
         finally:
             for i, task in enumerate(tasks):
