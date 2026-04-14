@@ -184,9 +184,7 @@ class ParallelLLMStream(LLMStream):
                 _race_llm(i, llm_instance),
                 name=f"ParallelAdapter._race_llm_{llm_instance.label}",
             )
-            for i, llm_instance in enumerate(
-                entry.llm for entry in self._parallel_adapter._entries
-            )
+            for i, llm_instance in enumerate(entry.llm for entry in self._parallel_adapter._entries)
         )
 
         def _on_done(*_: Any) -> None:
