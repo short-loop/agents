@@ -169,9 +169,7 @@ class ParallelLLMStream(LLMStream):
                         if winner_index == index:
                             if winning_request_id is None:
                                 winning_request_id = chunk.id
-                                self._parallel_adapter._winning_request_ids.add(
-                                    winning_request_id
-                                )
+                                self._parallel_adapter._winning_request_ids.add(winning_request_id)
                             chunk_ch.send_nowait(chunk)
                         else:
                             return
