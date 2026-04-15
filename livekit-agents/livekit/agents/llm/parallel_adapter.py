@@ -15,7 +15,7 @@ from .llm import LLM, ChatChunk, LLMStream
 from .tool_context import Tool, ToolChoice
 
 
-@dataclass
+@dataclass(frozen=True)
 class ParallelLLMEntry:
     """An LLM instance with a label for use in :class:`ParallelAdapter`."""
 
@@ -167,7 +167,11 @@ class ParallelLLMStream(LLMStream):
                                 if i != index and not t.done():
                                     t.cancel()
                         if winner_index == index:
-                            winning_request_id = chunk.id
+                            if winning_request_id is None:
+                                winning_request_id = chunk.id
+                                self._parallel_adapter._winning_request_ids.add(
+                                    winning_request_id
+                                )
                             chunk_ch.send_nowait(chunk)
                         else:
                             return
@@ -210,9 +214,6 @@ class ParallelLLMStream(LLMStream):
             for i, task in enumerate(tasks):
                 if i != winner_index and not task.done():
                     task.cancel()
-
-            if winning_request_id:
-                self._parallel_adapter._winning_request_ids.add(winning_request_id)
 
             await asyncio.gather(*tasks, return_exceptions=True)
 
