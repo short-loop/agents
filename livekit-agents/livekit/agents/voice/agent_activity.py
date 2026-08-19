@@ -1753,6 +1753,64 @@ class AgentActivity(RecognitionHooks):
                 model_settings=model_settings,
             )
 
+    # fork(SL-3890): silence-gate hold measurement. Kept as additive helpers so the
+    # upstream authorization blocks in _tts_task_impl/_pipeline_reply_task_impl stay
+    # byte-identical (minimizes conflicts when pulling upstream).
+    def _gate_closed_timestamp(self, speech_handle: SpeechHandle) -> float | None:
+        """Timestamp if the user-silence gate is closed as this speech starts waiting
+        for playout authorization, else None."""
+        if speech_handle.allow_interruptions and not self._user_silence_event.is_set():
+            return time.time()
+        return None
+
+    def _log_silence_gate_hold(self, speech_handle: SpeechHandle, closed_at: float | None) -> None:
+        """Log how long playout was held while the silence gate was closed.
+
+        Note: the measured duration also includes any concurrent authorization wait;
+        it is logged only when the gate was closed at wait start, which is what makes
+        the hold attributable to user speech."""
+        if closed_at is None:
+            return
+        logger.debug(
+            "playout held by silence gate",
+            extra={
+                "held": round(time.time() - closed_at, 3),
+                "interruption_mode": self._session._interruption_tracker.mode.value,
+                "speech_id": speech_handle.id,
+                "interrupted_while_held": speech_handle.interrupted,
+            },
+        )
+
+    def _log_reply_latency(
+        self,
+        speech_handle: SpeechHandle,
+        *,
+        e2e_latency: float,
+        user_metrics: llm.MetricsReport,
+        llm_ttft: float | None,
+        tts_ttfb: float | None,
+    ) -> None:
+        """fork(SL-3890): one greppable line per reply — user stopped speaking to
+        first audio frame — with the component breakdown alongside."""
+        end_of_turn_delay = user_metrics.get("end_of_turn_delay")
+        transcription_delay = user_metrics.get("transcription_delay")
+        logger.info(
+            "agent reply latency",
+            extra={
+                "e2e_latency": round(e2e_latency, 3),
+                "end_of_turn_delay": round(end_of_turn_delay, 3)
+                if end_of_turn_delay is not None
+                else None,
+                "transcription_delay": round(transcription_delay, 3)
+                if transcription_delay is not None
+                else None,
+                "llm_ttft": round(llm_ttft, 3) if llm_ttft is not None else None,
+                "tts_ttfb": round(tts_ttfb, 3) if tts_ttfb is not None else None,
+                "interruption_mode": self._session._interruption_tracker.mode.value,
+                "speech_id": speech_handle.id,
+            },
+        )
+
     async def _tts_task_impl(
         self,
         speech_handle: SpeechHandle,
@@ -1771,6 +1829,7 @@ class AgentActivity(RecognitionHooks):
         )
         audio_output = self._session.output.audio if self._session.output.audio_enabled else None
 
+        _gate_closed_at = self._gate_closed_timestamp(speech_handle)  # fork(SL-3890)
         # See discussion in https://github.com/livekit/agents/issues/4432
         authorization_tasks: list[asyncio.Future[Any]] = [
             asyncio.ensure_future(speech_handle._wait_for_authorization())
@@ -1779,6 +1838,7 @@ class AgentActivity(RecognitionHooks):
             authorization_tasks.append(asyncio.ensure_future(self._user_silence_event.wait()))
         await speech_handle.wait_if_not_interrupted(authorization_tasks)
         speech_handle._clear_authorization()
+        self._log_silence_gate_hold(speech_handle, _gate_closed_at)  # fork(SL-3890)
 
         if speech_handle.interrupted:
             current_span.set_attribute(trace_types.ATTR_SPEECH_INTERRUPTED, True)
@@ -2061,6 +2121,7 @@ class AgentActivity(RecognitionHooks):
 
         self._session._update_agent_state("thinking")
 
+        _gate_closed_at = self._gate_closed_timestamp(speech_handle)  # fork(SL-3890)
         authorization_tasks: list[asyncio.Future[Any]] = [
             asyncio.ensure_future(speech_handle._wait_for_authorization())
         ]
@@ -2068,6 +2129,7 @@ class AgentActivity(RecognitionHooks):
             authorization_tasks.append(asyncio.ensure_future(self._user_silence_event.wait()))
         await speech_handle.wait_if_not_interrupted(authorization_tasks)
         speech_handle._clear_authorization()
+        self._log_silence_gate_hold(speech_handle, _gate_closed_at)  # fork(SL-3890)
 
         if speech_handle.interrupted:
             current_span.set_attribute(trace_types.ATTR_SPEECH_INTERRUPTED, True)
@@ -2120,6 +2182,13 @@ class AgentActivity(RecognitionHooks):
             if user_metrics and "stopped_speaking_at" in user_metrics:
                 early_metrics["e2e_latency"] = (
                     started_speaking_at - user_metrics["stopped_speaking_at"]
+                )
+                self._log_reply_latency(  # fork(SL-3890)
+                    speech_handle,
+                    e2e_latency=early_metrics["e2e_latency"],
+                    user_metrics=user_metrics,
+                    llm_ttft=llm_gen_data.ttft,
+                    tts_ttfb=tts_gen_data.ttfb if tts_gen_data else None,
                 )
             self._session._early_assistant_metrics = early_metrics
 
