@@ -74,6 +74,7 @@ from .generation import (
     remove_instructions,
     update_instructions,
 )
+from .interruption_tracker import InterruptionMode
 from .speech_handle import DEFAULT_INPUT_DETAILS, InputDetails, SpeechHandle
 
 if TYPE_CHECKING:
@@ -127,10 +128,6 @@ class AgentActivity(RecognitionHooks):
         self._paused_speech: SpeechHandle | None = None
         self._false_interruption_timer: asyncio.TimerHandle | None = None
         self._cancel_speech_pause_task: asyncio.Task[None] | None = None
-
-        # for interrupt backoff
-        self._last_interrupt_time: float | None = None
-        self._interruption_history: list[float] = []
 
         self._stt_eos_received: bool = False
 
@@ -302,10 +299,8 @@ class AgentActivity(RecognitionHooks):
     def is_bot_speaking(self) -> bool:
         return self._session.agent_state == "speaking"
 
-    def recently_interrupted(self) -> bool:
-        if self._last_interrupt_time is None:
-            return False
-        return (time.time() - self._last_interrupt_time) < 3.0
+    def interruption_mode(self) -> InterruptionMode:
+        return self._session._interruption_tracker.mode
 
     @property
     def get_last_user_language(self) -> LanguageCode | None:
@@ -1020,12 +1015,6 @@ class AgentActivity(RecognitionHooks):
             and chat context has been updated
         """
         self._cancel_preemptive_generation()
-        self._last_interrupt_time = time.time()
-        self._interruption_history.append(self._last_interrupt_time)
-        logger.debug(
-            "interrupt recorded",
-            extra={"total_interruptions": len(self._interruption_history)},
-        )
 
         future = asyncio.Future[None]()
 
@@ -1313,7 +1302,6 @@ class AgentActivity(RecognitionHooks):
             and self._current_speech.allow_interruptions
         ):
             self._paused_speech = self._current_speech
-            self._last_interrupt_time = time.time()
 
             # reset the false interruption timer
             if self._false_interruption_timer:
@@ -1355,7 +1343,10 @@ class AgentActivity(RecognitionHooks):
             "listening",
             last_speaking_time=speech_end_time,
         )
-        self._user_silence_event.set()
+        gate = self._session._interruption_tracker.silence_gate()
+        if gate is None or ev is None or ev.silence_duration >= gate:
+            self._user_silence_event.set()
+        # else: a later VAD INFERENCE_DONE opens the gate once enough silence accumulates
 
         if (
             self._paused_speech
@@ -1381,7 +1372,16 @@ class AgentActivity(RecognitionHooks):
             # 3. VAD speech is still ongoing
             self._interrupt_by_audio_activity()
 
-        if (
+        gate = self._session._interruption_tracker.silence_gate()
+        if gate is not None:
+            # interruption-backoff mode: hold agent playout until enough silence
+            # has accumulated, even after VAD end-of-speech (silero keeps
+            # accumulating raw silence across INFERENCE_DONE events)
+            if ev.raw_accumulated_silence <= gate:
+                self._user_silence_event.clear()
+            else:
+                self._user_silence_event.set()
+        elif (
             ev.speaking
             # allow some silence between utterances during active speech
             and ev.raw_accumulated_silence <= self._session.options.min_endpointing_delay / 2
@@ -1456,6 +1456,7 @@ class AgentActivity(RecognitionHooks):
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None:
         if (
             not self._session.options.preemptive_generation
+            or self._session._interruption_tracker.preemptive_disabled()
             or self._scheduling_paused
             or (self._current_speech is not None and not self._current_speech.interrupted)
             or not isinstance(self.llm, llm.LLM)

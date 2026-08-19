@@ -56,6 +56,7 @@ from .events import (
     UserState,
     UserStateChangedEvent,
 )
+from .interruption_tracker import InterruptionBackoffOptions, InterruptionTracker
 from .ivr import IVRActivity
 from .recorder_io import RecorderIO
 from .run_result import RunResult
@@ -126,7 +127,7 @@ class AgentSessionOptions:
     discard_audio_if_uninterruptible: bool
     min_interruption_duration: float
     min_interruption_words: int
-    interrupt_backoff: float
+    interruption_backoff: InterruptionBackoffOptions | None
     min_endpointing_delay: float
     max_endpointing_delay: float
     max_tool_steps: int
@@ -199,7 +200,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         discard_audio_if_uninterruptible: bool = True,
         min_interruption_duration: float = 0.5,
         min_interruption_words: int = 0,
-        interrupt_backoff: float = 3.0,
+        interruption_backoff: InterruptionBackoffOptions | None = None,
         backchannel_words: NotGivenOr[set[str]] = NOT_GIVEN,
         commit_words: NotGivenOr[set[str]] = NOT_GIVEN,
         min_endpointing_delay: float = 0.5,
@@ -219,6 +220,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         loop: asyncio.AbstractEventLoop | None = None,
         # deprecated
         agent_false_interruption_timeout: NotGivenOr[float | None] = NOT_GIVEN,
+        interrupt_backoff: NotGivenOr[float] = NOT_GIVEN,
     ) -> None:
         """`AgentSession` is the LiveKit Agents runtime that glues together
         media streams, speech/LLM components, and tool orchestration into a
@@ -262,6 +264,14 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 register as an interruption. Default ``0.5`` s.
             min_interruption_words (int): Minimum number of words to consider
                 an interruption, only used if stt enabled. Default ``0``.
+            interruption_backoff (InterruptionBackoffOptions, optional): Enables
+                interruption-backoff modes. When the conversation shows a pattern of
+                the agent being interrupted (assistant items committed with
+                ``interrupted=True``), the session enters a transient (window-based,
+                self-expiring) or sustained (sticky) mode that lengthens endpointing
+                for low-confidence turns, raises the playout silence gate, and
+                optionally disables preemptive generation. ``None`` (default)
+                disables the feature entirely.
             min_endpointing_delay (float): Minimum time-in-seconds since the
                 last detected speech before the agent declares the user’s turn
                 complete. In VAD mode this effectively behaves like
@@ -322,6 +332,12 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             )
             false_interruption_timeout = agent_false_interruption_timeout
 
+        if is_given(interrupt_backoff):
+            logger.warning(
+                "`interrupt_backoff` is deprecated and ignored, use "
+                "`interruption_backoff=InterruptionBackoffOptions(...)` instead"
+            )
+
         if not is_given(video_sampler):
             video_sampler = VoiceActivityVideoSampler(speaking_fps=1.0, silent_fps=0.3)
 
@@ -334,7 +350,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
             discard_audio_if_uninterruptible=discard_audio_if_uninterruptible,
             min_interruption_duration=min_interruption_duration,
             min_interruption_words=min_interruption_words,
-            interrupt_backoff=interrupt_backoff,
+            interruption_backoff=interruption_backoff,
             min_endpointing_delay=min_endpointing_delay,
             max_endpointing_delay=max_endpointing_delay,
             max_tool_steps=max_tool_steps,
@@ -406,6 +422,8 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         self._agent: Agent | None = None
         self._activity: AgentActivity | None = None
         self._next_activity: AgentActivity | None = None
+        # per-session (survives agent handoffs) interruption pattern tracking
+        self._interruption_tracker = InterruptionTracker(self._opts.interruption_backoff)
         self._user_state: UserState = "listening"
         self._agent_state: AgentState = "initializing"
         self._user_away_timer: asyncio.TimerHandle | None = None
@@ -1422,6 +1440,21 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
     def _conversation_item_added(self, message: llm.ChatMessage) -> None:
         self._chat_ctx.insert(message)
+
+        if self._interruption_tracker.enabled and (message.text_content or "").strip():
+            if message.role == "assistant" and message.interrupted:
+                self._interruption_tracker.record_interruption()
+            elif message.role == "user":
+                old_mode = self._interruption_tracker.mode
+                new_mode = self._interruption_tracker.record_user_turn()
+                if (
+                    new_mode is not old_mode
+                    and self._interruption_tracker.preemptive_disabled()
+                    and self._activity is not None
+                ):
+                    # an already in-flight preemptive generation must not survive mode entry
+                    self._activity._cancel_preemptive_generation()
+
         self.emit("conversation_item_added", ConversationItemAddedEvent(item=message))
 
     def _tool_items_added(self, items: Sequence[llm.FunctionCall | llm.FunctionCallOutput]) -> None:
