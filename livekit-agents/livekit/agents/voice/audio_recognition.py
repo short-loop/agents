@@ -22,6 +22,7 @@ from ..utils import aio, is_given
 from . import io
 from ._utils import _set_participant_attributes
 from .agent import ModelSettings
+from .interruption_tracker import InterruptionMode
 
 if TYPE_CHECKING:
     from .agent_session import AgentSession
@@ -229,7 +230,7 @@ class RecognitionHooks(Protocol):
     def on_end_of_turn(self, info: _EndOfTurnInfo) -> bool: ...
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def is_bot_speaking(self) -> bool: ...
-    def recently_interrupted(self) -> bool: ...
+    def interruption_mode(self) -> InterruptionMode: ...
 
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
 
@@ -771,20 +772,41 @@ class AudioRecognition:
 
             use_raw_delay = False
             delay_reason = "default"
-            if self._hooks.recently_interrupted():
-                endpointing_delay = self._session.options.interrupt_backoff
-                delay_reason = "interrupt_backoff"
-            elif _ends_with_number_like(self._audio_transcript):
+
+            mode = self._hooks.interruption_mode()
+            backoff_opts = self._session.options.interruption_backoff
+            mode_threshold: float | None = None
+            mode_backoff: float | None = None
+            mode_name = ""
+            if backoff_opts is not None and mode is InterruptionMode.TRANSIENT:
+                mode_threshold = backoff_opts.transient.unlikely_threshold
+                mode_backoff = backoff_opts.transient.backoff_delay
+                mode_name = "transient"
+            elif backoff_opts is not None and mode is InterruptionMode.SUSTAINED:
+                mode_threshold = backoff_opts.sustained.unlikely_threshold
+                mode_backoff = backoff_opts.sustained.backoff_delay
+                mode_name = "sustained"
+
+            if _ends_with_number_like(self._audio_transcript):
                 endpointing_delay = self._max_endpointing_delay
                 use_raw_delay = True
                 delay_reason = "ends_with_number"
+                if mode_backoff is not None and mode_backoff > endpointing_delay:
+                    endpointing_delay = mode_backoff
+                    delay_reason = f"ends_with_number+{mode_name}_backoff"
             elif _ends_with_alpha_numeric(self._audio_transcript):
                 endpointing_delay = self._max_endpointing_delay - 1.0
                 use_raw_delay = True
                 delay_reason = "ends_with_alphanumeric"
+                if mode_backoff is not None and mode_backoff > endpointing_delay:
+                    endpointing_delay = mode_backoff
+                    delay_reason = f"ends_with_alphanumeric+{mode_name}_backoff"
             elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.info("Turn detector does not support language %s", self._last_language)
+                    if mode_backoff is not None:
+                        endpointing_delay = mode_backoff
+                        delay_reason = f"{mode_name}_backoff_no_eou"
                 else:
                     with (
                         trace.use_span(user_turn_span),
@@ -793,6 +815,7 @@ class AudioRecognition:
                         # if there are failures, we should not hold the pipeline up
                         end_of_turn_probability = 0.0
                         unlikely_threshold: float | None = None
+                        predict_ok = False
                         try:
                             end_of_turn_probability = await turn_detector.predict_end_of_turn(
                                 chat_ctx
@@ -800,14 +823,35 @@ class AudioRecognition:
                             unlikely_threshold = await turn_detector.unlikely_threshold(
                                 self._last_language
                             )
-                            if (
-                                unlikely_threshold is not None
-                                and end_of_turn_probability < unlikely_threshold
-                            ):
-                                endpointing_delay = self._max_endpointing_delay
-                                delay_reason = "eou_unlikely"
+                            predict_ok = True
                         except Exception:
                             logger.exception("Error predicting end of turn")
+
+                        if not predict_ok:
+                            if mode_backoff is not None:
+                                # prediction unavailable: fall back to a flat mode backoff
+                                endpointing_delay = mode_backoff
+                                delay_reason = f"{mode_name}_backoff_no_eou"
+                        else:
+                            # in a backoff mode the EOU model still runs: confident turns
+                            # keep the fast default delay, uncertain ones pay the backoff
+                            effective_threshold = unlikely_threshold
+                            if mode_threshold is not None:
+                                effective_threshold = (
+                                    mode_threshold
+                                    if unlikely_threshold is None
+                                    else max(unlikely_threshold, mode_threshold)
+                                )
+                            if (
+                                effective_threshold is not None
+                                and end_of_turn_probability < effective_threshold
+                            ):
+                                if mode_backoff is not None:
+                                    endpointing_delay = mode_backoff
+                                    delay_reason = f"{mode_name}_backoff"
+                                else:
+                                    endpointing_delay = self._max_endpointing_delay
+                                    delay_reason = "eou_unlikely"
 
                         eou_detection_span.set_attributes(
                             {
@@ -833,6 +877,10 @@ class AudioRecognition:
                                 trace_types.ATTR_EOU_LANGUAGE: self._last_language or "",
                             }
                         )
+            elif mode_backoff is not None:
+                # no turn detector configured
+                endpointing_delay = mode_backoff
+                delay_reason = f"{mode_name}_backoff_no_eou"
 
             def compute_sleep(primary_delay: float) -> float:
                 if ignore_last_speaking_time:
@@ -866,6 +914,7 @@ class AudioRecognition:
                     "last_speaking_time": last_speaking_time,
                     "use_raw_delay": use_raw_delay,
                     "ignore_last_speaking_time": ignore_last_speaking_time,
+                    "interruption_mode": mode.value,
                 },
             )
 

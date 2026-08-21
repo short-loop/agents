@@ -16,6 +16,11 @@ from .events import (
     UserInputTranscribedEvent,
     UserStateChangedEvent,
 )
+from .interruption_tracker import (
+    InterruptionBackoffOptions,
+    InterruptionMode,
+    InterruptionModeSettings,
+)
 from .room_io import (
     _ParticipantAudioOutput,
     _ParticipantStreamTranscriptionOutput,
@@ -27,6 +32,9 @@ from .transcription import TranscriptSynchronizer, text_transforms
 __all__ = [
     "AgentSession",
     "RecordingOptions",
+    "InterruptionBackoffOptions",
+    "InterruptionMode",
+    "InterruptionModeSettings",
     "VoiceActivityVideoSampler",
     "Agent",
     "ModelSettings",
