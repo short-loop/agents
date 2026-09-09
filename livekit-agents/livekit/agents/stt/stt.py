@@ -60,6 +60,8 @@ class SpeechData:
     speaker_id: str | None = None
     is_primary_speaker: bool | None = None
     words: list[TimedString] | None = None
+    detected_languages: list[LanguageCode] | None = None
+    """All languages detected in this result (multilingual models only), most prominent first."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.language, LanguageCode) and isinstance(self.language, str):

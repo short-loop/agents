@@ -746,14 +746,16 @@ def live_transcription_to_speech_data(
                     start_time=word.get("start", 0) + start_time_offset,
                     end_time=word.get("end", 0) + start_time_offset,
                     start_time_offset=start_time_offset,
+                    language=word.get("language", NOT_GIVEN),
                 )
                 for word in alt["words"]
             ]
             if alt["words"]
             else None,
         )
-        if language == "multi" and "languages" in alt:
-            sd.language = LanguageCode(alt["languages"][0])  # TODO: handle multiple languages
+        if language == "multi" and alt.get("languages"):
+            sd.language = LanguageCode(alt["languages"][0])
+            sd.detected_languages = [LanguageCode(lang) for lang in alt["languages"]]
         speech_data.append(sd)
     return speech_data
 
