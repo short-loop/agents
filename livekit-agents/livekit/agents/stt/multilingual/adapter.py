@@ -53,6 +53,8 @@ _ADAPTER_CONN_OPTIONS = APIConnectOptions(max_retry=0, timeout=DEFAULT_API_CONNE
 _DETECTOR_RESTART_INITIAL_BACKOFF = 1.0
 _DETECTOR_RESTART_MAX_BACKOFF = 30.0
 _BOUNDARY_POLL_INTERVAL = 0.1
+# detector finals kept for replay at a switch flip (pruned as primary finals commit)
+_PENDING_DETECTOR_FINALS_MAX = 16
 
 _TRANSCRIPT_EVENT_TYPES = (
     SpeechEventType.INTERIM_TRANSCRIPT,
@@ -333,8 +335,9 @@ class MultilingualRecognizeStream(RecognizeStream):
         self._detector_backoff = _DETECTOR_RESTART_INITIAL_BACKOFF
         self._audio_clock = 0.0
         self._last_detector_activity_clock = 0.0
-        self._last_transcript_end_ts = 0.0
+        self._forwarded_final_end_ts = 0.0
         self._flip_gate_ts = 0.0
+        self._pending_detector_finals: list[SpeechEvent] = []
         self._input_ended = False
         self._primary_ended = False
 
@@ -374,6 +377,7 @@ class MultilingualRecognizeStream(RecognizeStream):
         self._detector_restart_task = None
         self._input_ended = False
         self._primary_ended = False
+        self._pending_detector_finals = []
 
         # a retry must rebuild at the adapter's current language, not the initial one
         self._language = adapter._current_language
@@ -547,9 +551,9 @@ class MultilingualRecognizeStream(RecognizeStream):
 
         if msg.stream is self._primary_stream:
             self._engine.on_primary_event(ev)
-            if is_transcript and has_text:
-                self._note_transcript_ts(ev)
             if self._owner == "primary":
+                if ev.type == SpeechEventType.FINAL_TRANSCRIPT and has_text:
+                    self._note_forwarded_final(ev)
                 with contextlib.suppress(aio.ChanClosed):
                     self._event_ch.send_nowait(ev)
             return
@@ -568,8 +572,18 @@ class MultilingualRecognizeStream(RecognizeStream):
         if is_transcript:
             self._last_detector_activity_clock = self._audio_clock
             self._detector_backoff = _DETECTOR_RESTART_INITIAL_BACKOFF
-            if has_text:
-                self._note_transcript_ts(ev)
+
+        # while the primary owns, keep detector finals for speech the session has not
+        # received a (primary) final for yet: if a switch flips ownership, they are
+        # replayed so the utterance that triggered the switch is never lost
+        if (
+            self._owner == "primary"
+            and ev.type == SpeechEventType.FINAL_TRANSCRIPT
+            and has_text
+            and ev.alternatives[0].end_time > self._forwarded_final_end_ts
+        ):
+            self._pending_detector_finals.append(ev)
+            del self._pending_detector_finals[:-_PENDING_DETECTOR_FINALS_MAX]
 
         result = self._engine.on_detector_event(ev)
         self._handle_engine_result(result)
@@ -588,7 +602,9 @@ class MultilingualRecognizeStream(RecognizeStream):
         if self._owner != "detector":
             return
 
-        # DETECTOR_OWNS: the detector is the transcriber of record
+        # DETECTOR_OWNS: the detector is the transcriber of record. Gate on end_time:
+        # a final that overlaps an already-committed primary final but extends past it
+        # is forwarded (a duplicated garbled prefix is recoverable; lost speech is not)
         if ev.type in (
             SpeechEventType.FINAL_TRANSCRIPT,
             SpeechEventType.PREFLIGHT_TRANSCRIPT,
@@ -596,8 +612,10 @@ class MultilingualRecognizeStream(RecognizeStream):
             if (
                 ev.alternatives
                 and ev.alternatives[0].text
-                and ev.alternatives[0].start_time >= self._flip_gate_ts
+                and ev.alternatives[0].end_time > self._flip_gate_ts
             ):
+                if ev.type == SpeechEventType.FINAL_TRANSCRIPT:
+                    self._note_forwarded_final(ev)
                 with contextlib.suppress(aio.ChanClosed):
                     self._event_ch.send_nowait(ev)
         elif ev.type == SpeechEventType.INTERIM_TRANSCRIPT:
@@ -715,9 +733,13 @@ class MultilingualRecognizeStream(RecognizeStream):
 
             # ---- flip 1: the detector becomes the transcriber of record --------------
             self._owner = "detector"
-            self._flip_gate_ts = self._last_transcript_end_ts
+            self._flip_gate_ts = self._forwarded_final_end_ts
             self._engine.on_switch_started(target)
             self._emit_clear_events()
+            # the utterance that triggered the switch usually never produced a primary
+            # final (the pinned model couldn't finalize it) — replay the detector's
+            # buffered finals so that speech reaches the session instead of vanishing
+            self._replay_pending_finals()
 
             watchdog: asyncio.Task[None] | None = None
             new_stream: RecognizeStream | None = None
@@ -945,11 +967,26 @@ class MultilingualRecognizeStream(RecognizeStream):
         self._detector_stream = self._open_child(self._adapter._detector, role="detector")
         logger.info("multilingual adapter: detector stream restarted")
 
-    def _note_transcript_ts(self, ev: SpeechEvent) -> None:
+    def _note_forwarded_final(self, ev: SpeechEvent) -> None:
+        # tracks how far (in audio time) the session has received committed finals;
+        # buffered detector finals fully covered by forwarded content are dropped
         if ev.alternatives:
-            self._last_transcript_end_ts = max(
-                self._last_transcript_end_ts, ev.alternatives[0].end_time
+            self._forwarded_final_end_ts = max(
+                self._forwarded_final_end_ts, ev.alternatives[0].end_time
             )
+            self._pending_detector_finals = [
+                e
+                for e in self._pending_detector_finals
+                if e.alternatives[0].end_time > self._forwarded_final_end_ts
+            ]
+
+    def _replay_pending_finals(self) -> None:
+        pending, self._pending_detector_finals = self._pending_detector_finals, []
+        for ev in pending:
+            if ev.alternatives[0].end_time > self._flip_gate_ts:
+                self._note_forwarded_final(ev)
+                with contextlib.suppress(aio.ChanClosed):
+                    self._event_ch.send_nowait(ev)
 
     def _emit_clear_events(self) -> None:
         # an empty INTERIM is required to clear a dangling interim downstream

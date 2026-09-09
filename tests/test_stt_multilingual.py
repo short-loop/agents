@@ -398,6 +398,55 @@ async def test_heuristic_switch_end_to_end() -> None:
     await harness.aclose()
 
 
+async def test_trigger_utterance_replayed_at_flip() -> None:
+    # regression: the pinned primary garbles a foreign utterance into interims and never
+    # finalizes it; the detector final that triggered the switch is consumed while the
+    # primary still owns the stream. It must be replayed at flip 1 — otherwise the
+    # utterance vanishes and the session commits an empty user turn.
+    options = LanguageSwitchOptions(
+        switch_grace_s=0.1,
+        boundary_silence_s=0.05,
+        max_detector_owns_s=2.0,
+        switch_timeout_s=0.5,
+        switch_threshold=1.0,
+        min_detector_confidence=0.5,
+    )
+    adapter, primary, detector, _ = make_adapter(supports_update=True, options=options)
+    harness = Harness(adapter)
+
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    # a committed english final sets the forwarded gate at 5.0
+    primary_stream.send_transcript("hello there", language="en", start_time=0.0, end_time=5.0)
+    detector_stream.send_transcript("hello there", language="en", start_time=0.0, end_time=5.0)
+    await harness.wait_for(lambda: "hello there" in harness.texts())
+
+    # the primary only manages a garbled interim for the hindi utterance — no final
+    primary_stream.send_transcript(
+        "kia upload the data center",
+        language="en",
+        event_type=SpeechEventType.INTERIM_TRANSCRIPT,
+        start_time=6.0,
+        end_time=8.0,
+    )
+    trigger = "क्या आप लोग टोयोटा की गाड़ियां सर्विस करते हैं"
+    detector_stream.send_transcript(
+        trigger, language="hi", confidence=0.9, start_time=6.0, end_time=8.0
+    )
+
+    await harness.wait_for(lambda: len(harness.adapter_events["language_switched"]) == 1, 5.0)
+
+    # the trigger utterance was replayed to the session as a FINAL
+    finals = [t for ty, t in harness.transcripts() if ty == SpeechEventType.FINAL_TRANSCRIPT]
+    assert trigger in finals
+    # ...but the already-committed english final was not duplicated from the detector
+    assert harness.texts().count("hello there") == 1
+
+    await harness.aclose()
+
+
 async def test_heuristic_suppressed_during_switch() -> None:
     adapter, primary, detector, _ = make_adapter(supports_update=True)
     harness = Harness(adapter)
