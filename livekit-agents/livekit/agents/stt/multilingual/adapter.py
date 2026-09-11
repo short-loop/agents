@@ -56,6 +56,10 @@ _BOUNDARY_POLL_INTERVAL = 0.1
 # detector finals kept for replay at a switch flip (pruned as primary finals commit)
 _PENDING_DETECTOR_FINALS_MAX = 16
 
+# a forwarded final ending this far behind the dedup watermark indicates a child STT
+# whose audio clock reset (e.g. provider-internal reconnect) without compensation
+_CLOCK_REGRESSION_WARN_S = 5.0
+
 _TRANSCRIPT_EVENT_TYPES = (
     SpeechEventType.INTERIM_TRANSCRIPT,
     SpeechEventType.PREFLIGHT_TRANSCRIPT,
@@ -323,6 +327,10 @@ class MultilingualRecognizeStream(RecognizeStream):
         self._all_children: set[RecognizeStream] = set()
         self._pumps: dict[RecognizeStream, asyncio.Task[None]] = {}
         self._child_stt: dict[RecognizeStream, STT] = {}
+        # session audio position when each child was created: a late-created child
+        # (recreate shadow, detector restart) only receives frames from that point on,
+        # so its own audio time 0 must be anchored there to stay on the session clock
+        self._child_anchor: dict[RecognizeStream, float] = {}
         self._merged_ch: aio.Chan[_ChildMsg] = aio.Chan()
         self._primary_stream: RecognizeStream | None = None
         self._detector_stream: RecognizeStream | None = None
@@ -337,6 +345,7 @@ class MultilingualRecognizeStream(RecognizeStream):
         self._last_detector_activity_clock = 0.0
         self._forwarded_final_end_ts = 0.0
         self._flip_gate_ts = 0.0
+        self._clock_regression_warned = False
         self._pending_detector_finals: list[SpeechEvent] = []
         self._input_ended = False
         self._primary_ended = False
@@ -353,7 +362,7 @@ class MultilingualRecognizeStream(RecognizeStream):
             raise ValueError("start_time_offset must be non-negative")
         self._start_time_offset = value
         for child in list(self._fanout):
-            child.start_time_offset = value
+            child.start_time_offset = value + self._child_anchor.get(child, 0.0)
 
     async def _request_switch(
         self, target: LanguageCode, *, initiator: SwitchInitiator, reason: str
@@ -370,6 +379,7 @@ class MultilingualRecognizeStream(RecognizeStream):
         self._all_children = set()
         self._pumps = {}
         self._child_stt = {}
+        self._child_anchor = {}
         self._merged_ch = aio.Chan[_ChildMsg]()
         self._active_switch = None
         self._owner = "primary"
@@ -415,7 +425,8 @@ class MultilingualRecognizeStream(RecognizeStream):
         language: NotGivenOr[str] = NOT_GIVEN,
     ) -> RecognizeStream:
         child = stt_instance.stream(language=language, conn_options=self._conn_options)
-        child.start_time_offset = self._start_time_offset
+        self._child_anchor[child] = self._audio_clock
+        child.start_time_offset = self._start_time_offset + self._audio_clock
         self._fanout.append(child)
         self._all_children.add(child)
         self._child_stt[child] = stt_instance
@@ -875,6 +886,7 @@ class MultilingualRecognizeStream(RecognizeStream):
             self._fanout.remove(stream)
         pump = self._pumps.pop(stream, None)
         stt_instance = self._child_stt.pop(stream, None)
+        self._child_anchor.pop(stream, None)
         self._all_children.discard(stream)
 
         adapter = self._adapter
@@ -971,9 +983,21 @@ class MultilingualRecognizeStream(RecognizeStream):
         # tracks how far (in audio time) the session has received committed finals;
         # buffered detector finals fully covered by forwarded content are dropped
         if ev.alternatives:
-            self._forwarded_final_end_ts = max(
-                self._forwarded_final_end_ts, ev.alternatives[0].end_time
-            )
+            end_time = ev.alternatives[0].end_time
+            if (
+                end_time + _CLOCK_REGRESSION_WARN_S < self._forwarded_final_end_ts
+                and not self._clock_regression_warned
+            ):
+                self._clock_regression_warned = True
+                # a large backwards jump means a child's audio clock reset without
+                # compensation (provider-internal reconnect): the replay dedup
+                # watermark is unreliable and duplicated transcripts are possible
+                logger.warning(
+                    "multilingual adapter: forwarded final end_time regressed "
+                    f"({end_time:.1f}s < watermark {self._forwarded_final_end_ts:.1f}s); "
+                    "a child STT likely reset its audio clock on reconnect"
+                )
+            self._forwarded_final_end_ts = max(self._forwarded_final_end_ts, end_time)
             self._pending_detector_finals = [
                 e
                 for e in self._pending_detector_finals

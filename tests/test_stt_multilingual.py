@@ -278,6 +278,37 @@ async def test_manual_switch_recreate() -> None:
     await harness.aclose()
 
 
+async def test_recreate_child_anchored_to_audio_clock() -> None:
+    # a late-created child only receives audio from its creation onwards, so its own
+    # audio time 0 must be anchored at the session audio position — otherwise its
+    # timestamps lag every sibling's and the replay dedup watermark breaks
+    adapter, primary, detector, factory_created = make_adapter(
+        supports_update=False, with_factory=True
+    )
+    harness = Harness(adapter)
+    await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+
+    # exactly 3s of audio, fully forwarded before the switch creates the shadow
+    for _ in range(300):
+        harness.stream.push_frame(make_frame(duration_ms=10))
+    await harness.wait_for(lambda: len(detector_stream.received_frames) >= 300)
+
+    switch_task = asyncio.create_task(adapter.switch_language("hi"))
+    await harness.wait_for(lambda: len(factory_created) == 1)
+    shadow_stream = await factory_created[0].wait_for_stream()
+    assert shadow_stream.start_time_offset == pytest.approx(3.0, abs=0.05)
+
+    # an external offset set composes with each child's creation anchor
+    harness.stream.start_time_offset = 10.0
+    assert detector_stream.start_time_offset == pytest.approx(10.0, abs=0.05)
+    assert shadow_stream.start_time_offset == pytest.approx(13.0, abs=0.05)
+
+    harness.start_pushing_audio()
+    await asyncio.wait_for(switch_task, 5.0)
+    await harness.aclose()
+
+
 async def test_detector_owns_window_forwards_detector() -> None:
     adapter, primary, detector, _ = make_adapter(supports_update=True)
     harness = Harness(adapter)
