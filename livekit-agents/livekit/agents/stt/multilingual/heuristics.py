@@ -228,11 +228,19 @@ class _HeuristicEngine:
         if fraction is not None:
             composition_scale = 0.5 + 0.5 * fraction
 
-        script_mult = opts.script_mismatch_boost if _is_cross_script(self._current, text) else 1.0
+        cross_script = _is_cross_script(self._current, text)
+        if cross_script:
+            # a mismatched script is near-conclusive on its own: short fragments are
+            # not discounted below the floor, and one confident full-length final may
+            # contribute up to the boost (a single sentence can cross thresholds >1.0)
+            length_weight = max(length_weight, opts.cross_script_length_floor)
+        script_mult = opts.script_mismatch_boost if cross_script else 1.0
 
         # evidence is denominated in "confident full utterances": one final contributes
-        # at most 1.0 before the turn bonus, so switch_threshold reads as utterances
-        delta = min(1.0, length_weight * confidence * composition_scale * script_mult) * weight
+        # at most 1.0 before the turn bonus (up to script_mismatch_boost for
+        # cross-script finals), so switch_threshold reads as utterances
+        raw = length_weight * confidence * composition_scale * script_mult
+        delta = min(script_mult, raw) * weight
         if is_final:
             evidence.consecutive_turns += 1
             if evidence.consecutive_turns >= 2:

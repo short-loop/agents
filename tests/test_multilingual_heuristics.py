@@ -54,14 +54,33 @@ def test_cross_script_detection() -> None:
 
 def test_threshold_crossing_cross_script() -> None:
     engine = make_engine(switch_threshold=2.0)
-    # 8+ words, conf 0.9, cross-script boost 1.5 -> capped at 1.0 per final; the second
-    # final adds the turn bonus and crosses
+    # 8 words, conf 0.9, cross-script boost 1.5 -> 1.35 per final (cross-script finals
+    # may contribute up to the boost); the second final adds the turn bonus and crosses
     assert engine.on_detector_event(final(HINDI_LONG, end_time=1.0)) is None
     result = engine.on_detector_event(final(HINDI_LONG, end_time=2.0))
     assert isinstance(result, SwitchDecision)
     assert result.target == "hi"
     assert result.trigger_transcript == HINDI_LONG
     assert result.first_evidence_audio_ts == 1.0
+
+
+def test_single_cross_script_sentence_can_cross() -> None:
+    # one confident full-length cross-script final contributes up to the script boost
+    # (not 1.0), so it alone crosses a threshold slightly above one utterance
+    engine = make_engine(switch_threshold=1.2, turn_bonus=0.0)
+    result = engine.on_detector_event(final(HINDI_LONG, confidence=0.9, end_time=1.0))
+    assert isinstance(result, SwitchDecision)
+
+
+def test_short_cross_script_finals_cross_at_first_sentence() -> None:
+    # regression (run3): a short first Hindi sentence split into two tiny finals
+    # ("कहां" + "उपस्थित हो?") must cross the cross-script preset threshold (1.2) by the
+    # end of the first sentence — the length floor keeps unambiguous-script fragments
+    # from being discounted to near-zero. A lone one-word fragment still must not switch.
+    engine = make_engine(switch_threshold=1.2, min_detector_confidence=0.55)
+    assert engine.on_detector_event(final("कहां", confidence=0.96, end_time=25.0)) is None
+    result = engine.on_detector_event(final("उपस्थित हो?", confidence=0.9, end_time=26.0))
+    assert isinstance(result, SwitchDecision)
 
 
 def test_same_script_needs_more_evidence() -> None:
@@ -92,7 +111,7 @@ def test_current_language_final_breaks_streak() -> None:
 
 def test_evidence_decays_over_audio_time() -> None:
     engine = make_engine(switch_threshold=2.0, evidence_half_life_s=10.0, turn_bonus=0.0)
-    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))  # score 1.0 (capped)
+    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))  # score 1.35
     # 30s of audio later, score decayed by ~8x; a second final must not cross alone
     result = engine.on_detector_event(final(HINDI_LONG, end_time=31.0))
     assert result is None

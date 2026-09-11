@@ -34,9 +34,10 @@ class LanguageSwitchOptions:
     switch_threshold: float = 2.0
     """Accumulated evidence required to trigger a switch, in units of one confident,
     full-length utterance: a single final contributes at most 1.0 (before the turn
-    bonus), so ``2.0`` reads as "two confident utterances' worth of evidence". Providers
-    that emit fragmented finals (e.g. aggressive endpointing) accumulate the same total
-    across several smaller contributions."""
+    bonus) — except cross-script finals, which may contribute up to
+    ``script_mismatch_boost`` — so ``2.0`` reads as "two confident utterances' worth of
+    evidence". Providers that emit fragmented finals (e.g. aggressive endpointing)
+    accumulate the same total across several smaller contributions."""
 
     min_detector_confidence: float = 0.6
     """Detector results below this transcription confidence contribute no evidence."""
@@ -55,7 +56,15 @@ class LanguageSwitchOptions:
 
     script_mismatch_boost: float = 1.5
     """Evidence multiplier when the detector text's Unicode script differs from the
-    current language's expected script (cross-script pairs only)."""
+    current language's expected script (cross-script pairs only). Cross-script finals
+    are also allowed to contribute up to this value (instead of 1.0) per final, so a
+    single confident full-length utterance can cross thresholds slightly above 1.0."""
+
+    cross_script_length_floor: float = 0.5
+    """Minimum length weight for cross-script finals. A short final in a mismatched
+    script (e.g. a two-word Devanagari fragment on an ``en`` primary) is near-conclusive
+    evidence on its own, so it is not discounted below this floor the way an equally
+    short same-script final would be."""
 
     turn_bonus: float = 0.5
     """Extra evidence added for the second and subsequent consecutive turns in the
