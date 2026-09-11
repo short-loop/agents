@@ -40,7 +40,7 @@ class LanguageSwitchSuppressedEvent:
 
     target_language: LanguageCode
     reason: Literal[
-        "cooldown",
+        "reentry",
         "allowlist",
         "auto_switch_disabled",
         "switch_in_progress",

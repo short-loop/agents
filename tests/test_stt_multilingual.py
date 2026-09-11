@@ -27,8 +27,7 @@ FAST_OPTIONS = LanguageSwitchOptions(
     boundary_silence_s=0.05,
     max_detector_owns_s=2.0,
     switch_timeout_s=0.5,
-    hard_cooldown_s=1.0,
-    manual_cooldown_s=1.0,
+    reentry_decay_s=1.0,
 )
 
 
@@ -377,7 +376,7 @@ async def test_heuristic_switch_end_to_end() -> None:
     harness.start_pushing_audio()
 
     # one long, confident, cross-script utterance crosses threshold 1.0 alone:
-    # length weight 1.0 (8 words) * confidence 0.9 * script boost 1.5 = 1.35
+    # length weight 1.0 (8 words) * confidence 0.9 * script boost 1.5, capped at 1.0
     detector_stream.send_transcript(
         "नमस्ते आप कैसे हैं मुझे मदद चाहिए धन्यवाद",
         language="hi",

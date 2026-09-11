@@ -125,7 +125,7 @@ class SwitchSuppressed:
     """Evidence crossed the threshold but the switch is blocked."""
 
     target: LanguageCode
-    reason: Literal["cooldown", "allowlist", "auto_switch_disabled"]
+    reason: Literal["reentry", "allowlist", "auto_switch_disabled"]
     score: float
 
 
@@ -162,7 +162,9 @@ class _HeuristicEngine:
         # all dicts keyed by base language (LanguageCode.language)
         self._evidence: dict[str, _Evidence] = {}
         self._target_codes: dict[str, LanguageCode] = {}
-        self._cooldown_until: dict[str, float] = {}
+        # switched-away languages under an elevated re-entry threshold:
+        # base -> (initial multiplier, switch audio_ts)
+        self._reentry: dict[str, tuple[float, float]] = {}
         self._last_audio_ts: float = 0.0
         self._last_snapshot_ts: float = float("-inf")
         self._switch_inflight = False
@@ -228,7 +230,9 @@ class _HeuristicEngine:
 
         script_mult = opts.script_mismatch_boost if _is_cross_script(self._current, text) else 1.0
 
-        delta = length_weight * confidence * composition_scale * script_mult * weight
+        # evidence is denominated in "confident full utterances": one final contributes
+        # at most 1.0 before the turn bonus, so switch_threshold reads as utterances
+        delta = min(1.0, length_weight * confidence * composition_scale * script_mult) * weight
         if is_final:
             evidence.consecutive_turns += 1
             if evidence.consecutive_turns >= 2:
@@ -239,20 +243,23 @@ class _HeuristicEngine:
             evidence.first_evidence_audio_ts = audio_ts
             evidence.first_evidence_wall_ts = self._now()
 
-        # during the hard cooldown, suppression is reported against the base threshold so
-        # the block stays observable; the elevated re-entry threshold applies afterwards
-        in_cooldown = audio_ts < self._cooldown_until.get(base, float("-inf"))
-        multiplier = 1.0 if in_cooldown else self._reentry_multiplier(base, audio_ts)
+        multiplier = self._reentry_multiplier(base, audio_ts)
         threshold = opts.switch_threshold * multiplier
         if evidence.score < threshold or self._switch_inflight:
+            # crossing the base threshold under an elevated re-entry bar stays observable
+            if (
+                not self._switch_inflight
+                and multiplier > 1.0
+                and evidence.score >= opts.switch_threshold
+            ):
+                return SwitchSuppressed(
+                    target=self._target_codes[base], reason="reentry", score=evidence.score
+                )
             return None
 
         target = self._target_codes[base]
         if self._allowed is not None and base not in self._allowed:
             return SwitchSuppressed(target=target, reason="allowlist", score=evidence.score)
-
-        if in_cooldown:
-            return SwitchSuppressed(target=target, reason="cooldown", score=evidence.score)
 
         if not opts.auto_switch:
             return SwitchSuppressed(
@@ -285,17 +292,23 @@ class _HeuristicEngine:
         self._switch_inflight = False
         self._evidence.clear()
 
-        cooldown = (
-            self._opts.manual_cooldown_s if initiator == "manual" else self._opts.hard_cooldown_s
+        multiplier = (
+            self._opts.manual_reentry_multiplier
+            if initiator == "manual"
+            else self._opts.reentry_threshold_multiplier
         )
         if old.language:
-            self._cooldown_until[old.language] = self._last_audio_ts + cooldown
-        self._cooldown_until.pop(new_language.language, None)
+            self._reentry[old.language] = (multiplier, self._last_audio_ts)
+        self._reentry.pop(new_language.language, None)
 
     def on_switch_failed(self, target: LanguageCode) -> None:
         self._switch_inflight = False
         self._evidence.pop(target.language, None)
-        self._cooldown_until[target.language] = self._last_audio_ts + self._opts.hard_cooldown_s
+        # elevated bar (not a hard block) against an immediate retry storm
+        self._reentry[target.language] = (
+            self._opts.reentry_threshold_multiplier,
+            self._last_audio_ts,
+        )
 
     def evidence_snapshot_if_due(self) -> dict[str, float] | None:
         if not self._evidence:
@@ -318,23 +331,19 @@ class _HeuristicEngine:
         evidence.last_update_audio_ts = max(evidence.last_update_audio_ts, audio_ts)
 
     def _reentry_multiplier(self, base: str, audio_ts: float) -> float:
-        cooldown_end = self._cooldown_until.get(base)
-        if cooldown_end is None:
+        entry = self._reentry.get(base)
+        if entry is None:
             return 1.0
 
-        opts = self._opts
-        if audio_ts < cooldown_end:
-            return opts.reentry_threshold_multiplier
-
-        elapsed = audio_ts - cooldown_end
-        if elapsed >= opts.reentry_decay_s or opts.reentry_decay_s <= 0:
-            del self._cooldown_until[base]
+        multiplier, since = entry
+        decay_s = self._opts.reentry_decay_s
+        elapsed = audio_ts - since
+        if elapsed >= decay_s or decay_s <= 0:
+            del self._reentry[base]
             return 1.0
 
-        progress = elapsed / opts.reentry_decay_s
-        return opts.reentry_threshold_multiplier + progress * (
-            1.0 - opts.reentry_threshold_multiplier
-        )
+        progress = elapsed / decay_s
+        return multiplier + progress * (1.0 - multiplier)
 
     def _word_language_fraction(self, words: object, base: str) -> float | None:
         """Fraction of language-tagged words in ``base``; None when no tags available."""

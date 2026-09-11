@@ -54,7 +54,8 @@ def test_cross_script_detection() -> None:
 
 def test_threshold_crossing_cross_script() -> None:
     engine = make_engine(switch_threshold=2.0)
-    # 8+ words, conf 0.9, cross-script boost 1.5 -> 1.35 per final; second adds turn bonus
+    # 8+ words, conf 0.9, cross-script boost 1.5 -> capped at 1.0 per final; the second
+    # final adds the turn bonus and crosses
     assert engine.on_detector_event(final(HINDI_LONG, end_time=1.0)) is None
     result = engine.on_detector_event(final(HINDI_LONG, end_time=2.0))
     assert isinstance(result, SwitchDecision)
@@ -65,7 +66,7 @@ def test_threshold_crossing_cross_script() -> None:
 
 def test_same_script_needs_more_evidence() -> None:
     engine = make_engine(switch_threshold=2.0)
-    # spanish over english primary: no script boost -> 0.9, then 0.9 + 1.0 turn bonus
+    # spanish over english primary: no script boost -> 0.9, then 0.9 + 0.5 turn bonus
     assert engine.on_detector_event(final(SPANISH_LONG, language="es", end_time=1.0)) is None
     result = engine.on_detector_event(final(SPANISH_LONG, language="es", end_time=2.0))
     assert isinstance(result, SwitchDecision)
@@ -91,16 +92,15 @@ def test_current_language_final_breaks_streak() -> None:
 
 def test_evidence_decays_over_audio_time() -> None:
     engine = make_engine(switch_threshold=2.0, evidence_half_life_s=10.0, turn_bonus=0.0)
-    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))  # score ~1.35
+    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))  # score 1.0 (capped)
     # 30s of audio later, score decayed by ~8x; a second final must not cross alone
     result = engine.on_detector_event(final(HINDI_LONG, end_time=31.0))
     assert result is None
 
 
-def test_cooldown_and_reentry() -> None:
+def test_reentry_elevated_threshold() -> None:
     engine = make_engine(
         switch_threshold=1.0,
-        hard_cooldown_s=10.0,
         reentry_threshold_multiplier=2.0,
         reentry_decay_s=100.0,
         evidence_half_life_s=10_000.0,
@@ -111,19 +111,20 @@ def test_cooldown_and_reentry() -> None:
     engine.on_switch_started(decision.target)
     engine.on_switch_completed(LanguageCode("hi"), initiator="heuristic")
 
-    # switching back to english is blocked during the hard cooldown
+    # no hard block: the switched-away language faces an elevated (2x, decaying)
+    # threshold; crossing the base threshold under it stays observable
     result = engine.on_detector_event(
         final("hello how are you doing today my friend", language="en", end_time=5.0)
     )
     assert isinstance(result, SwitchSuppressed)
-    assert result.reason == "cooldown"
+    assert result.reason == "reentry"
 
-    # right after cooldown the re-entry threshold is elevated, decaying back to 1x
-    assert engine._reentry_multiplier("en", 11.0) == 2.0
-    assert 1.0 < engine._reentry_multiplier("en", 61.0) < 2.0
-    assert engine._reentry_multiplier("en", 250.0) == 1.0
+    # the multiplier starts at 2x right at the switch and decays linearly to 1x
+    assert engine._reentry_multiplier("en", 1.0) == 2.0
+    assert 1.0 < engine._reentry_multiplier("en", 51.0) < 2.0
 
-    # evidence kept accumulating during cooldown; once past it, the switch fires
+    # sustained english accumulates past the still-decaying bar — nothing hard-blocks it
+    result = None
     for i in range(4):
         result = engine.on_detector_event(
             final("keep talking in english for a while now ok", language="en", end_time=12.0 + i)
@@ -132,22 +133,30 @@ def test_cooldown_and_reentry() -> None:
             break
     assert isinstance(result, SwitchDecision)
 
+    # fully decayed: back to the base threshold (and the entry is dropped)
+    assert engine._reentry_multiplier("en", 250.0) == 1.0
 
-def test_manual_cooldown_is_stickier() -> None:
+
+def test_manual_switch_is_stickier() -> None:
     engine = make_engine(
         switch_threshold=1.0,
-        hard_cooldown_s=5.0,
-        manual_cooldown_s=50.0,
+        reentry_threshold_multiplier=2.0,
+        manual_reentry_multiplier=4.0,
+        reentry_decay_s=100.0,
         evidence_half_life_s=10_000.0,
     )
     engine.on_switch_started(LanguageCode("hi"))
     engine.on_switch_completed(LanguageCode("hi"), initiator="manual")
 
+    # manual elevation starts higher than the heuristic one
+    assert engine._reentry_multiplier("en", 0.0) == 4.0
+
+    # one strong english sentence crosses the base threshold but not the manual bar
     result = engine.on_detector_event(
         final("hello how are you doing today my friend", language="en", end_time=30.0)
     )
     assert isinstance(result, SwitchSuppressed)
-    assert result.reason == "cooldown"
+    assert result.reason == "reentry"
 
 
 def test_allowlist_suppression() -> None:

@@ -31,8 +31,12 @@ class LanguageSwitchOptions:
     requires ``primary_factory``. ``auto`` probes for in-place support and falls back to
     the factory."""
 
-    switch_threshold: float = 3.0
-    """Accumulated evidence score required to trigger a switch."""
+    switch_threshold: float = 2.0
+    """Accumulated evidence required to trigger a switch, in units of one confident,
+    full-length utterance: a single final contributes at most 1.0 (before the turn
+    bonus), so ``2.0`` reads as "two confident utterances' worth of evidence". Providers
+    that emit fragmented finals (e.g. aggressive endpointing) accumulate the same total
+    across several smaller contributions."""
 
     min_detector_confidence: float = 0.6
     """Detector results below this transcription confidence contribute no evidence."""
@@ -53,23 +57,23 @@ class LanguageSwitchOptions:
     """Evidence multiplier when the detector text's Unicode script differs from the
     current language's expected script (cross-script pairs only)."""
 
-    turn_bonus: float = 1.0
+    turn_bonus: float = 0.5
     """Extra evidence added for the second and subsequent consecutive turns in the
-    same non-primary language."""
+    same non-primary language (half an utterance's worth by default)."""
 
     word_length_cap: int = 8
     """Word count at which an utterance contributes full length weight."""
 
-    hard_cooldown_s: float = 10.0
-    """After a heuristic switch, no switch back to the previous language for this long."""
-
-    manual_cooldown_s: float = 30.0
-    """After a manual switch, no heuristic switch back for this long (manual intent is
-    stickier than acoustic evidence)."""
-
     reentry_threshold_multiplier: float = 2.0
-    """After a cooldown expires, the switched-away language needs this multiple of
-    ``switch_threshold``, decaying linearly back to 1x over ``reentry_decay_s``."""
+    """Immediately after a heuristic switch, the switched-away language needs this
+    multiple of ``switch_threshold``, decaying linearly back to 1x over
+    ``reentry_decay_s``. There is no hard block: sufficiently strong evidence can always
+    switch back — it just costs more right after a switch."""
+
+    manual_reentry_multiplier: float = 3.0
+    """Same as ``reentry_threshold_multiplier`` but applied after a *manual* switch
+    (:meth:`MultilingualAdapter.switch_language`, e.g. an LLM function tool) — explicit
+    intent is stickier than acoustic evidence."""
 
     reentry_decay_s: float = 60.0
     """Time for the re-entry threshold multiplier to decay back to 1x (audio time)."""

@@ -253,7 +253,7 @@ class MultilingualAdapter(
 
         Goes through the same serialized switch path and transition window as heuristic
         switches, but resets accumulated evidence and applies the (stronger)
-        ``manual_cooldown_s`` stickiness afterwards.
+        ``manual_reentry_multiplier`` stickiness afterwards.
 
         Raises:
             LanguageNotAllowedError: if ``language`` is not in the configured allowlist.
