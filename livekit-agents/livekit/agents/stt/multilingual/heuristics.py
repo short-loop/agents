@@ -8,7 +8,7 @@ from typing import Literal
 from ...language import LanguageCode
 from ...types import NotGivenOr
 from ...utils import is_given
-from ..stt import SpeechEvent, SpeechEventType
+from ..stt import SpeechData, SpeechEvent, SpeechEventType
 from .config import LanguageSwitchOptions
 
 # Unicode script ranges for the cross-script boost (signal 1). Coarse on purpose:
@@ -264,27 +264,14 @@ class _HeuristicEngine:
         self._target_codes[base] = sd.language
         self._decay(evidence, audio_ts)
 
-        n_words = len(text.split())
-        length_weight = min(n_words, opts.word_length_cap) / opts.word_length_cap
-
-        composition_scale = 1.0
-        fraction = self._word_language_fraction(sd.words, base)
-        if fraction is not None:
-            composition_scale = 0.5 + 0.5 * fraction
-
         cross_script = _is_cross_script(self._current, text)
-        if cross_script:
-            # a mismatched script is near-conclusive on its own: short fragments are
-            # not discounted below the floor, and one confident full-length final may
-            # contribute up to the boost (a single sentence can cross thresholds >1.0)
-            length_weight = max(length_weight, opts.cross_script_length_floor)
         script_mult = opts.script_mismatch_boost if cross_script else 1.0
 
         # evidence is denominated in "confident full utterances": one final contributes
         # at most 1.0 before the turn bonus (up to script_mismatch_boost for
-        # cross-script finals), so switch_threshold reads as utterances
-        raw = length_weight * confidence * composition_scale * script_mult
-        delta = min(script_mult, raw) * weight
+        # cross-script finals, where a mismatched script is near-conclusive on its own),
+        # so switch_threshold reads as utterances
+        delta = self._final_delta(sd, text, base, boost=script_mult, floor=cross_script) * weight
         if is_final:
             evidence.consecutive_turns += 1
             if evidence.consecutive_turns >= 2:
@@ -295,9 +282,69 @@ class _HeuristicEngine:
             evidence.first_evidence_audio_ts = audio_ts
             evidence.first_evidence_wall_ts = self._now()
 
+        _trace(delta, evidence.score, _bar(base), None)
+        return self._decide(base, evidence, audio_ts, trigger=text, reason="evidence_threshold")
+
+    def on_final_rescued(self, ev: SpeechEvent) -> SwitchDecision | SwitchSuppressed | None:
+        """Supplemental evidence for a rescued final (see ``rescued_final_boost``).
+
+        A rescued final means the primary produced no final for that speech — a primary
+        deaf to a whole utterance the detector heard confidently is near-conclusive
+        evidence of a language mismatch. The final was already scored on arrival; this
+        re-scores it with the rescued treatment (length floor, per-final cap raised to
+        the boost) and credits the difference, which may itself trigger the switch.
+        """
+        opts = self._opts
+        if opts.rescued_final_boost <= 1.0 or not ev.alternatives:
+            return None
+
+        sd = ev.alternatives[0]
+        text = sd.text.strip()
+        base = sd.language.language if sd.language else ""
+        if base in ("", "multi") or base == self._current.language:
+            return None
+        if len(text) <= opts.min_transcript_length:
+            return None
+        confidence = sd.confidence if sd.confidence > 0 else opts.default_confidence
+        if confidence < opts.min_detector_confidence:
+            return None
+
+        cross_script = _is_cross_script(self._current, text)
+        script_mult = opts.script_mismatch_boost if cross_script else 1.0
+        already = self._final_delta(sd, text, base, boost=script_mult, floor=cross_script)
+        boosted = self._final_delta(
+            sd, text, base, boost=max(script_mult, opts.rescued_final_boost), floor=True
+        )
+        extra = boosted - already
+        if extra <= 0:
+            return None
+
+        audio_ts = self._last_audio_ts
+        evidence = self._evidence.setdefault(base, _Evidence(last_update_audio_ts=audio_ts))
+        self._target_codes[base] = sd.language
+        self._decay(evidence, audio_ts)
+        evidence.score += extra
+        if evidence.first_evidence_audio_ts is None:
+            evidence.first_evidence_audio_ts = audio_ts
+            evidence.first_evidence_wall_ts = self._now()
+
+        self._last_trace = EventTrace(
+            text=text,
+            language=base,
+            confidence=sd.confidence,
+            delta=extra,
+            score=evidence.score,
+            bar=opts.switch_threshold * self._reentry_multiplier(base, audio_ts),
+            gate=None,
+        )
+        return self._decide(base, evidence, audio_ts, trigger=text, reason="rescued_final")
+
+    def _decide(
+        self, base: str, evidence: _Evidence, audio_ts: float, *, trigger: str, reason: str
+    ) -> SwitchDecision | SwitchSuppressed | None:
+        opts = self._opts
         multiplier = self._reentry_multiplier(base, audio_ts)
         threshold = opts.switch_threshold * multiplier
-        _trace(delta, evidence.score, threshold, None)
         if evidence.score < threshold or self._switch_inflight:
             # crossing the base threshold under an elevated re-entry bar stays observable
             if (
@@ -324,14 +371,34 @@ class _HeuristicEngine:
         return SwitchDecision(
             target=target,
             score=evidence.score,
-            reason="evidence_threshold",
-            trigger_transcript=text,
+            reason=reason,
+            trigger_transcript=trigger,
             first_evidence_audio_ts=evidence.first_evidence_audio_ts,
             first_evidence_wall_ts=evidence.first_evidence_wall_ts,
         )
 
+    def _final_delta(
+        self, sd: SpeechData, text: str, base: str, *, boost: float, floor: bool
+    ) -> float:
+        """Per-final evidence contribution, before interim weighting and the turn bonus.
+
+        ``boost`` is both the evidence multiplier and the per-final cap; ``floor``
+        applies the cross-script length floor so near-conclusive short fragments are
+        not discounted.
+        """
+        opts = self._opts
+        confidence = sd.confidence if sd.confidence > 0 else opts.default_confidence
+        length_weight = min(len(text.split()), opts.word_length_cap) / opts.word_length_cap
+        if floor:
+            length_weight = max(length_weight, opts.cross_script_length_floor)
+        composition_scale = 1.0
+        fraction = self._word_language_fraction(sd.words, base)
+        if fraction is not None:
+            composition_scale = 0.5 + 0.5 * fraction
+        return min(boost, length_weight * confidence * composition_scale * boost)
+
     def on_primary_event(self, ev: SpeechEvent) -> None:
-        # reserved for v2 signals (primary confidence collapse, text-content mismatch)
+        # reserved for v2 signals (text-content mismatch)
         pass
 
     def on_switch_started(self, target: LanguageCode) -> None:

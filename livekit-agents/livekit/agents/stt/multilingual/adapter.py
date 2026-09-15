@@ -63,6 +63,13 @@ _CLOCK_REGRESSION_WARN_S = 5.0
 # how often the detector-rescue watchdog checks the buffered finals
 _RESCUE_POLL_INTERVAL_S = 0.25
 
+# a buffered detector final whose speech began this far (or more) before the dedup
+# watermark overlaps a final the session already received: the two engines merely
+# disagree on the utterance's end timestamp, so rescuing it would duplicate the text.
+# The slack absorbs cross-engine word-boundary jitter without dropping legitimate
+# rescues, whose utterances begin after everything already forwarded.
+_RESCUE_COVERAGE_SLACK_S = 0.25
+
 _TRANSCRIPT_EVENT_TYPES = (
     SpeechEventType.INTERIM_TRANSCRIPT,
     SpeechEventType.PREFLIGHT_TRANSCRIPT,
@@ -1022,17 +1029,33 @@ class MultilingualRecognizeStream(RecognizeStream):
                 continue
             while self._pending_detector_finals:
                 ev = self._pending_detector_finals[0]
-                if self._audio_clock - ev.alternatives[0].end_time < rescue_s:
+                sd = ev.alternatives[0]
+                if self._audio_clock - sd.end_time < rescue_s:
                     break
                 self._pending_detector_finals.pop(0)
+                if sd.start_time + _RESCUE_COVERAGE_SLACK_S < self._forwarded_final_end_ts:
+                    logger.debug(
+                        "multilingual adapter: dropping buffered detector final that "
+                        f"overlaps an already-forwarded final: {sd.text!r}"
+                    )
+                    continue
                 self._note_forwarded_final(ev)
                 logger.info(
                     "multilingual adapter: rescued detector final the primary never "
-                    f"finalized: {ev.alternatives[0].text!r} "
-                    f"(language={ev.alternatives[0].language})"
+                    f"finalized: {sd.text!r} (language={sd.language})"
                 )
                 with contextlib.suppress(aio.ChanClosed):
                     self._event_ch.send_nowait(ev)
+
+                # a primary deaf to a whole utterance is itself switch evidence
+                result = self._engine.on_final_rescued(ev)
+                trace = self._engine.consume_trace()
+                if trace is not None:
+                    logger.debug(
+                        f"multilingual adapter: rescue boost {trace.text!r} "
+                        f"extra={trace.delta:.2f} score={trace.score:.2f} bar={trace.bar:.2f}"
+                    )
+                self._handle_engine_result(result)
 
     def _note_forwarded_final(self, ev: SpeechEvent) -> None:
         # tracks how far (in audio time) the session has received committed finals;

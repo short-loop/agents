@@ -332,6 +332,66 @@ async def test_detector_rescue_skipped_when_primary_covers() -> None:
     await harness.aclose()
 
 
+async def test_detector_rescue_drops_final_overlapping_forwarded() -> None:
+    # the primary finalized the speech first, but the detector's copy of the same
+    # utterance carries a slightly LATER end_time (cross-engine endpointing jitter), so
+    # the end_time-based pruning misses it; coverage by start_time must drop it instead
+    # of rescuing a duplicate
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    primary_stream.send_transcript("hi joy", language="en", start_time=0.1, end_time=end_time)
+    await harness.wait_for(lambda: "hi joy" in harness.texts())
+    detector_stream.send_transcript(
+        "hi joy", language="en", start_time=0.1, end_time=end_time + 0.2
+    )
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= end_time + 1.0)
+    await asyncio.sleep(0.3)
+    assert harness.texts().count("hi joy") == 1
+
+    await harness.aclose()
+
+
+async def test_rescued_final_boost_triggers_switch() -> None:
+    # a rescued final means the primary was deaf to the whole utterance: it is
+    # re-scored with rescued_final_boost, which lets a single clear sentence cross a
+    # bar above the 1.0 same-script per-final cap (e.g. an elevated re-entry bar)
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=1.2)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    detector_stream.send_transcript(
+        "hola quiero reservar una cita para mi coche hoy",
+        language="es",
+        start_time=end_time - 0.4,
+        end_time=end_time,
+    )
+    # scoring on arrival: delta capped at 1.0 < 1.2, no switch
+    await asyncio.sleep(0.05)
+    assert harness.adapter_events["language_switch_started"] == []
+
+    # the rescue forwards the transcript AND boosts it to 1.5 >= 1.2
+    await harness.wait_for(lambda: len(harness.adapter_events["language_switch_started"]) == 1)
+    started = harness.adapter_events["language_switch_started"][0]
+    assert started.new_language == LanguageCode("es")
+    assert started.reason == "rescued_final"
+    assert "hola quiero reservar una cita" in " ".join(harness.texts())
+
+    await harness.aclose()
+
+
 async def test_recreate_child_anchored_to_audio_clock() -> None:
     # a late-created child only receives audio from its creation onwards, so its own
     # audio time 0 must be anchored at the session audio position — otherwise its

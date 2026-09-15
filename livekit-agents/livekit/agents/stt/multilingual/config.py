@@ -98,6 +98,14 @@ class LanguageSwitchOptions:
     unclear noise. Must be shorter than the session's final-transcript timeout so the
     rescued text still joins the user turn. ``0`` disables."""
 
+    rescued_final_boost: float = 1.5
+    """Evidence multiplier applied when a buffered detector final is *rescued* (the
+    primary produced no final covering that speech). A primary that is deaf to a whole
+    utterance the detector heard confidently is near-conclusive evidence of a language
+    mismatch — the same reasoning as the cross-script boost, so rescued finals also get
+    the length floor and may contribute up to this value (instead of 1.0), letting a
+    single clear sentence cross an elevated re-entry bar. ``1.0`` disables."""
+
     boundary_silence_s: float = 0.8
     """During the transition window, this much audio-time silence after a non-empty
     detector final counts as an utterance boundary (transition end)."""

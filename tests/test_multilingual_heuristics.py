@@ -248,3 +248,60 @@ def test_multi_and_empty_language_ignored() -> None:
     assert engine.on_detector_event(final(HINDI_LONG, language="multi", end_time=1.0)) is None
     assert engine.on_detector_event(final(HINDI_LONG, language="", end_time=2.0)) is None
     assert engine.on_detector_event(final("", language="hi", end_time=3.0)) is None
+
+
+def test_rescued_final_boost_adds_extra_evidence() -> None:
+    # a same-script final caps at 1.0 on arrival; when it is rescued (the primary was
+    # deaf to the whole utterance) it is re-scored up to rescued_final_boost
+    engine = make_engine(switch_threshold=1.4)
+    ev = final(SPANISH_LONG, language="es", confidence=1.0, end_time=1.0)
+    assert engine.on_detector_event(ev) is None  # 1.0 < 1.4
+
+    result = engine.on_final_rescued(ev)
+    assert isinstance(result, SwitchDecision)
+    assert result.reason == "rescued_final"
+    assert result.target == LanguageCode("es")
+    assert result.score == 1.5  # 1.0 credited on arrival + 0.5 rescue extra
+
+
+def test_rescued_final_crosses_elevated_reentry_bar() -> None:
+    # UAT regression (call 6aa91660...): after an en->es switch, "when does your sales
+    # open?" scored 0.99 against a 1.16 re-entry bar and did not revert even though the
+    # es-pinned primary heard nothing; the rescue boost must flip it on that sentence
+    engine = make_engine(
+        switch_threshold=1.0, reentry_threshold_multiplier=1.5, reentry_decay_s=60.0
+    )
+    engine.on_detector_event(final(SPANISH_LONG, language="es", confidence=1.0, end_time=42.0))
+    engine.on_switch_started(LanguageCode("es"))
+    engine.on_switch_completed(LanguageCode("es"), initiator="heuristic")
+
+    ev = final(
+        "yeah i have a question when do when does your sales open",
+        language="en",
+        confidence=0.99,
+        end_time=82.9,
+    )
+    assert engine.on_detector_event(ev) is None  # 0.99 < bar ~1.16
+
+    result = engine.on_final_rescued(ev)
+    assert isinstance(result, SwitchDecision)
+    assert result.reason == "rescued_final"
+    assert result.target == LanguageCode("en")
+
+
+def test_rescued_final_in_current_language_is_ignored() -> None:
+    # same-language rescues (short words the primary missed, e.g. a name) are not
+    # switch evidence
+    engine = make_engine(switch_threshold=1.0)
+    ev = final("hello there my friend how are you today", language="en", end_time=1.0)
+    assert engine.on_final_rescued(ev) is None
+    assert engine.evidence_snapshot_if_due() is None
+
+
+def test_rescued_cross_script_final_not_double_boosted() -> None:
+    # a cross-script final already carries the script boost on arrival; rescuing it
+    # must not stack another multiplier on top
+    engine = make_engine(switch_threshold=100.0)
+    ev = final(HINDI_LONG, end_time=1.0)
+    engine.on_detector_event(ev)
+    assert engine.on_final_rescued(ev) is None  # extra == 0
