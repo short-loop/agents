@@ -60,6 +60,9 @@ _PENDING_DETECTOR_FINALS_MAX = 16
 # whose audio clock reset (e.g. provider-internal reconnect) without compensation
 _CLOCK_REGRESSION_WARN_S = 5.0
 
+# how often the detector-rescue watchdog checks the buffered finals
+_RESCUE_POLL_INTERVAL_S = 0.25
+
 _TRANSCRIPT_EVENT_TYPES = (
     SpeechEventType.INTERIM_TRANSCRIPT,
     SpeechEventType.PREFLIGHT_TRANSCRIPT,
@@ -401,10 +404,17 @@ class MultilingualRecognizeStream(RecognizeStream):
         forward_task = asyncio.create_task(
             self._forward_input_task(), name="MultilingualAdapter.forward_input"
         )
+        rescue_task: asyncio.Task[None] | None = None
+        if self._opts.detector_rescue_s > 0:
+            rescue_task = asyncio.create_task(
+                self._rescue_watchdog(), name="MultilingualAdapter.detector_rescue"
+            )
 
         try:
             await self._gate_loop()
         finally:
+            if rescue_task is not None:
+                await aio.cancel_and_wait(rescue_task)
             await aio.cancel_and_wait(forward_task)
             if self._detector_restart_task is not None:
                 await aio.cancel_and_wait(self._detector_restart_task)
@@ -564,6 +574,14 @@ class MultilingualRecognizeStream(RecognizeStream):
             self._engine.on_primary_event(ev)
             if self._owner == "primary":
                 if ev.type == SpeechEventType.FINAL_TRANSCRIPT and has_text:
+                    # a rescued/replayed detector final may already cover this speech;
+                    # forwarding the late primary final would duplicate the user turn
+                    if ev.alternatives[0].end_time <= self._forwarded_final_end_ts:
+                        logger.debug(
+                            "multilingual adapter: dropping primary final already "
+                            f"covered by forwarded content: {ev.alternatives[0].text!r}"
+                        )
+                        return
                     self._note_forwarded_final(ev)
                 with contextlib.suppress(aio.ChanClosed):
                     self._event_ch.send_nowait(ev)
@@ -597,6 +615,15 @@ class MultilingualRecognizeStream(RecognizeStream):
             del self._pending_detector_finals[:-_PENDING_DETECTOR_FINALS_MAX]
 
         result = self._engine.on_detector_event(ev)
+        trace = self._engine.consume_trace()
+        if trace is not None:
+            gate_note = f" gate={trace.gate}" if trace.gate else ""
+            logger.debug(
+                f"multilingual adapter: detector heard {trace.text!r} "
+                f"lang={trace.language} conf={trace.confidence:.2f} "
+                f"delta={trace.delta:.2f} score={trace.score:.2f} "
+                f"bar={trace.bar:.2f}{gate_note}"
+            )
         self._handle_engine_result(result)
 
         snapshot = self._engine.evidence_snapshot_if_due()
@@ -978,6 +1005,34 @@ class MultilingualRecognizeStream(RecognizeStream):
 
         self._detector_stream = self._open_child(self._adapter._detector, role="detector")
         logger.info("multilingual adapter: detector stream restarted")
+
+    async def _rescue_watchdog(self) -> None:
+        """Forward buffered detector finals the primary never produced a final for.
+
+        A language-mismatched primary hears nothing while the detector heard the
+        utterance perfectly; below the switch threshold that speech would otherwise
+        vanish (and the app would treat the turn as unclear noise). Rescue only runs
+        while the primary owns and no switch is in flight — during the transition
+        window the detector forwards live, and a triggered switch replays the buffer.
+        """
+        rescue_s = self._opts.detector_rescue_s
+        while True:
+            await asyncio.sleep(_RESCUE_POLL_INTERVAL_S)
+            if self._owner != "primary" or self._active_switch is not None:
+                continue
+            while self._pending_detector_finals:
+                ev = self._pending_detector_finals[0]
+                if self._audio_clock - ev.alternatives[0].end_time < rescue_s:
+                    break
+                self._pending_detector_finals.pop(0)
+                self._note_forwarded_final(ev)
+                logger.info(
+                    "multilingual adapter: rescued detector final the primary never "
+                    f"finalized: {ev.alternatives[0].text!r} "
+                    f"(language={ev.alternatives[0].language})"
+                )
+                with contextlib.suppress(aio.ChanClosed):
+                    self._event_ch.send_nowait(ev)
 
     def _note_forwarded_final(self, ev: SpeechEvent) -> None:
         # tracks how far (in audio time) the session has received committed finals;

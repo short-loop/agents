@@ -130,6 +130,19 @@ class SwitchSuppressed:
 
 
 @dataclass
+class EventTrace:
+    """Per-detector-final scoring trace (tuning/observability; consumed by the adapter)."""
+
+    text: str
+    language: str
+    confidence: float
+    delta: float
+    score: float
+    bar: float
+    gate: str | None  # why the final contributed nothing (None = it contributed)
+
+
+@dataclass
 class _Evidence:
     score: float = 0.0
     last_update_audio_ts: float = 0.0
@@ -168,6 +181,7 @@ class _HeuristicEngine:
         self._last_audio_ts: float = 0.0
         self._last_snapshot_ts: float = float("-inf")
         self._switch_inflight = False
+        self._last_trace: EventTrace | None = None
 
     @property
     def current_language(self) -> LanguageCode:
@@ -176,6 +190,11 @@ class _HeuristicEngine:
     @property
     def last_audio_ts(self) -> float:
         return self._last_audio_ts
+
+    def consume_trace(self) -> EventTrace | None:
+        """The scoring trace of the last detector final, cleared on read."""
+        trace, self._last_trace = self._last_trace, None
+        return trace
 
     def on_detector_event(self, ev: SpeechEvent) -> SwitchDecision | SwitchSuppressed | None:
         opts = self._opts
@@ -200,20 +219,45 @@ class _HeuristicEngine:
         self._last_audio_ts = audio_ts
 
         base = sd.language.language if sd.language else ""
+
+        def _trace(delta: float, score: float, bar: float, gate: str | None) -> None:
+            # finetuning trace: what the detector heard and what it was worth
+            if is_final:
+                self._last_trace = EventTrace(
+                    text=text,
+                    language=base or str(sd.language or ""),
+                    confidence=sd.confidence,
+                    delta=delta,
+                    score=score,
+                    bar=bar,
+                    gate=gate,
+                )
+
+        def _bar(lang: str) -> float:
+            return opts.switch_threshold * self._reentry_multiplier(lang, audio_ts)
+
+        def _score(lang: str) -> float:
+            existing = self._evidence.get(lang)
+            return existing.score if existing else 0.0
+
         if base in ("", "multi"):
+            _trace(0.0, 0.0, opts.switch_threshold, "untagged")
             return None
 
         if base == self._current.language:
             # a turn in the current language breaks every candidate's streak
             for evidence in self._evidence.values():
                 evidence.consecutive_turns = 0
+            _trace(0.0, 0.0, _bar(base), "current_language")
             return None
 
         if len(text) <= opts.min_transcript_length:
+            _trace(0.0, _score(base), _bar(base), "too_short")
             return None
 
         confidence = sd.confidence if sd.confidence > 0 else opts.default_confidence
         if confidence < opts.min_detector_confidence:
+            _trace(0.0, _score(base), _bar(base), "low_confidence")
             return None
 
         evidence = self._evidence.setdefault(base, _Evidence(last_update_audio_ts=audio_ts))
@@ -253,6 +297,7 @@ class _HeuristicEngine:
 
         multiplier = self._reentry_multiplier(base, audio_ts)
         threshold = opts.switch_threshold * multiplier
+        _trace(delta, evidence.score, threshold, None)
         if evidence.score < threshold or self._switch_inflight:
             # crossing the base threshold under an elevated re-entry bar stays observable
             if (

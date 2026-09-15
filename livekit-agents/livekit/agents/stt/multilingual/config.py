@@ -79,13 +79,24 @@ class LanguageSwitchOptions:
     ``reentry_decay_s``. There is no hard block: sufficiently strong evidence can always
     switch back — it just costs more right after a switch."""
 
-    manual_reentry_multiplier: float = 3.0
+    manual_reentry_multiplier: float = 2.0
     """Same as ``reentry_threshold_multiplier`` but applied after a *manual* switch
-    (:meth:`MultilingualAdapter.switch_language`, e.g. an LLM function tool) — explicit
-    intent is stickier than acoustic evidence."""
+    (:meth:`MultilingualAdapter.switch_language`, e.g. an LLM function tool). Kept at
+    least as high as the heuristic multiplier so explicit intent is not undone by a
+    single stray utterance — but low enough that clear sustained intent to switch back
+    still gets through (and an explicit "switch back" request flows through the manual
+    path, which is never gated by evidence)."""
 
     reentry_decay_s: float = 60.0
     """Time for the re-entry threshold multiplier to decay back to 1x (audio time)."""
+
+    detector_rescue_s: float = 2.0
+    """While the primary owns, a buffered detector final that the primary has not
+    covered with its own final within this much audio time is forwarded anyway
+    ("detector rescue"): a language-mismatched primary hears nothing, but the detector
+    heard the utterance — without this the speech vanishes and the app treats it as
+    unclear noise. Must be shorter than the session's final-transcript timeout so the
+    rescued text still joins the user turn. ``0`` disables."""
 
     boundary_silence_s: float = 0.8
     """During the transition window, this much audio-time silence after a non-empty

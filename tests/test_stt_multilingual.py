@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 from collections.abc import Callable
 from typing import Any
 
@@ -28,6 +29,9 @@ FAST_OPTIONS = LanguageSwitchOptions(
     max_detector_owns_s=2.0,
     switch_timeout_s=0.5,
     reentry_decay_s=1.0,
+    # the pushed audio clock runs much faster than wall time in tests; rescue is
+    # exercised by its dedicated tests with an explicit window
+    detector_rescue_s=0.0,
 )
 
 
@@ -274,6 +278,56 @@ async def test_manual_switch_recreate() -> None:
     # detector keeps running across the switch
     detector_stream.send_transcript("अभी भी चालू", language="hi", end_time=100.0)
     await asyncio.sleep(0.05)
+
+    await harness.aclose()
+
+
+async def test_detector_rescue_forwards_unheard_final() -> None:
+    # a language-mismatched primary produces no final for the utterance; below the
+    # switch threshold the detector's buffered final must be forwarded anyway so the
+    # speech reaches the session instead of becoming an "unclear speech" timeout
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    detector_stream.send_transcript("let's continue in english", language="en", end_time=end_time)
+
+    await harness.wait_for(lambda: "let's continue in english" in harness.texts())
+    assert harness.adapter_events["language_switch_started"] == []
+
+    # a late primary final fully covered by the rescued content is dropped
+    primary_stream.send_transcript("stale garble", language="es", end_time=end_time)
+    await asyncio.sleep(0.1)
+    assert "stale garble" not in harness.texts()
+
+    await harness.aclose()
+
+
+async def test_detector_rescue_skipped_when_primary_covers() -> None:
+    # the primary finalized the same speech in time: the buffered detector final is
+    # pruned and never rescued (no duplicate)
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    detector_stream.send_transcript("hello there friend", language="en", end_time=end_time)
+    primary_stream.send_transcript("hello there friend!", language="en", end_time=end_time + 0.1)
+
+    await harness.wait_for(lambda: "hello there friend!" in harness.texts())
+    # wait out the rescue window: the detector's version must never be forwarded
+    await harness.wait_for(lambda: harness.stream._audio_clock >= end_time + 1.0)
+    await asyncio.sleep(0.3)
+    assert "hello there friend" not in harness.texts()
 
     await harness.aclose()
 

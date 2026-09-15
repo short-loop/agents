@@ -38,8 +38,15 @@ class ScriptedStream(RecognizeStream):
         event_type: SpeechEventType = SpeechEventType.FINAL_TRANSCRIPT,
         confidence: float = 1.0,
         start_time: float = 0.0,
-        end_time: float = 0.0,
+        end_time: float | None = None,
     ) -> None:
+        # real streams emit strictly increasing end_times (the adapter's dedup
+        # watermark relies on it); default to monotonic like a live provider
+        if end_time is None:
+            self._auto_end_time = getattr(self, "_auto_end_time", 0.0) + 1.0
+            end_time = self._auto_end_time
+        else:
+            self._auto_end_time = max(getattr(self, "_auto_end_time", 0.0), end_time)
         self.send_event(
             SpeechEvent(
                 type=event_type,
