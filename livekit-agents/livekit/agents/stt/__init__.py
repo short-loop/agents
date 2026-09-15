@@ -1,5 +1,15 @@
 from .fallback_adapter import AvailabilityChangedEvent, FallbackAdapter
 from .multi_speaker_adapter import MultiSpeakerAdapter
+from .multilingual import (
+    LanguageNotAllowedError,
+    LanguageSwitchedEvent,
+    LanguageSwitchEvidenceEvent,
+    LanguageSwitchFailedError,
+    LanguageSwitchOptions,
+    LanguageSwitchStartedEvent,
+    LanguageSwitchSuppressedEvent,
+    MultilingualAdapter,
+)
 from .stream_adapter import StreamAdapter, StreamAdapterWrapper
 from .stt import (
     STT,
@@ -28,6 +38,14 @@ __all__ = [
     "AvailabilityChangedEvent",
     "STTError",
     "MultiSpeakerAdapter",
+    "MultilingualAdapter",
+    "LanguageSwitchOptions",
+    "LanguageNotAllowedError",
+    "LanguageSwitchFailedError",
+    "LanguageSwitchStartedEvent",
+    "LanguageSwitchedEvent",
+    "LanguageSwitchSuppressedEvent",
+    "LanguageSwitchEvidenceEvent",
 ]
 
 # Cleanup docs of unexported modules

@@ -1,0 +1,307 @@
+from __future__ import annotations
+
+from livekit.agents.language import LanguageCode
+from livekit.agents.stt import LanguageSwitchOptions, SpeechData, SpeechEvent, SpeechEventType
+from livekit.agents.stt.multilingual.heuristics import (
+    SwitchDecision,
+    SwitchSuppressed,
+    _HeuristicEngine,
+    _is_cross_script,
+)
+from livekit.agents.types import TimedString
+
+
+def final(
+    text: str,
+    *,
+    language: str = "hi",
+    confidence: float = 0.9,
+    end_time: float = 1.0,
+    words: list[TimedString] | None = None,
+) -> SpeechEvent:
+    return SpeechEvent(
+        type=SpeechEventType.FINAL_TRANSCRIPT,
+        alternatives=[
+            SpeechData(
+                language=LanguageCode(language),
+                text=text,
+                confidence=confidence,
+                start_time=max(0.0, end_time - 1.0),
+                end_time=end_time,
+                words=words,
+            )
+        ],
+    )
+
+
+HINDI_LONG = "नमस्ते आप कैसे हैं मुझे मदद चाहिए धन्यवाद"
+SPANISH_LONG = "hola como estas amigo muy bien gracias por todo"
+
+
+def make_engine(**overrides: object) -> _HeuristicEngine:
+    opts = LanguageSwitchOptions(**overrides)  # type: ignore[arg-type]
+    return _HeuristicEngine(opts, LanguageCode("en"), now_fn=lambda: 1000.0)
+
+
+def test_cross_script_detection() -> None:
+    assert _is_cross_script(LanguageCode("en"), HINDI_LONG)
+    assert not _is_cross_script(LanguageCode("en"), SPANISH_LONG)
+    assert not _is_cross_script(LanguageCode("hi"), HINDI_LONG)
+    assert _is_cross_script(LanguageCode("hi"), "hello world again")
+    # unknown current language: no boost possible
+    assert not _is_cross_script(LanguageCode("xx"), HINDI_LONG)
+
+
+def test_threshold_crossing_cross_script() -> None:
+    engine = make_engine(switch_threshold=2.0)
+    # 8 words, conf 0.9, cross-script boost 1.5 -> 1.35 per final (cross-script finals
+    # may contribute up to the boost); the second final adds the turn bonus and crosses
+    assert engine.on_detector_event(final(HINDI_LONG, end_time=1.0)) is None
+    result = engine.on_detector_event(final(HINDI_LONG, end_time=2.0))
+    assert isinstance(result, SwitchDecision)
+    assert result.target == "hi"
+    assert result.trigger_transcript == HINDI_LONG
+    assert result.first_evidence_audio_ts == 1.0
+
+
+def test_single_cross_script_sentence_can_cross() -> None:
+    # one confident full-length cross-script final contributes up to the script boost
+    # (not 1.0), so it alone crosses a threshold slightly above one utterance
+    engine = make_engine(switch_threshold=1.2, turn_bonus=0.0)
+    result = engine.on_detector_event(final(HINDI_LONG, confidence=0.9, end_time=1.0))
+    assert isinstance(result, SwitchDecision)
+
+
+def test_short_cross_script_finals_cross_at_first_sentence() -> None:
+    # regression (run3): a short first Hindi sentence split into two tiny finals
+    # ("कहां" + "उपस्थित हो?") must cross the cross-script preset threshold (1.2) by the
+    # end of the first sentence — the length floor keeps unambiguous-script fragments
+    # from being discounted to near-zero. A lone one-word fragment still must not switch.
+    engine = make_engine(switch_threshold=1.2, min_detector_confidence=0.55)
+    assert engine.on_detector_event(final("कहां", confidence=0.96, end_time=25.0)) is None
+    result = engine.on_detector_event(final("उपस्थित हो?", confidence=0.9, end_time=26.0))
+    assert isinstance(result, SwitchDecision)
+
+
+def test_same_script_needs_more_evidence() -> None:
+    engine = make_engine(switch_threshold=2.0)
+    # spanish over english primary: no script boost -> 0.9, then 0.9 + 0.5 turn bonus
+    assert engine.on_detector_event(final(SPANISH_LONG, language="es", end_time=1.0)) is None
+    result = engine.on_detector_event(final(SPANISH_LONG, language="es", end_time=2.0))
+    assert isinstance(result, SwitchDecision)
+
+
+def test_short_and_low_confidence_gated() -> None:
+    engine = make_engine(switch_threshold=0.1)
+    assert engine.on_detector_event(final("हाँ", end_time=1.0)) is None  # too short
+    assert engine.on_detector_event(final(HINDI_LONG, confidence=0.3, end_time=2.0)) is None
+    # zero confidence means "not provided" and falls back to default_confidence
+    result = engine.on_detector_event(final(HINDI_LONG, confidence=0.0, end_time=3.0))
+    assert isinstance(result, SwitchDecision)
+
+
+def test_current_language_final_breaks_streak() -> None:
+    engine = make_engine(switch_threshold=3.0, turn_bonus=10.0)
+    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))
+    engine.on_detector_event(final("hello there my friend", language="en", end_time=2.0))
+    # streak broken: the next hindi final gets no turn bonus, so no decision
+    result = engine.on_detector_event(final(HINDI_LONG, end_time=3.0))
+    assert result is None
+
+
+def test_evidence_decays_over_audio_time() -> None:
+    engine = make_engine(switch_threshold=2.0, evidence_half_life_s=10.0, turn_bonus=0.0)
+    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))  # score 1.35
+    # 30s of audio later, score decayed by ~8x; a second final must not cross alone
+    result = engine.on_detector_event(final(HINDI_LONG, end_time=31.0))
+    assert result is None
+
+
+def test_reentry_elevated_threshold() -> None:
+    engine = make_engine(
+        switch_threshold=1.0,
+        reentry_threshold_multiplier=2.0,
+        reentry_decay_s=100.0,
+        evidence_half_life_s=10_000.0,
+        turn_bonus=0.0,
+    )
+    decision = engine.on_detector_event(final(HINDI_LONG, end_time=1.0))
+    assert isinstance(decision, SwitchDecision)
+    engine.on_switch_started(decision.target)
+    engine.on_switch_completed(LanguageCode("hi"), initiator="heuristic")
+
+    # no hard block: the switched-away language faces an elevated (2x, decaying)
+    # threshold; crossing the base threshold under it stays observable
+    result = engine.on_detector_event(
+        final("hello how are you doing today my friend", language="en", end_time=5.0)
+    )
+    assert isinstance(result, SwitchSuppressed)
+    assert result.reason == "reentry"
+
+    # the multiplier starts at 2x right at the switch and decays linearly to 1x
+    assert engine._reentry_multiplier("en", 1.0) == 2.0
+    assert 1.0 < engine._reentry_multiplier("en", 51.0) < 2.0
+
+    # sustained english accumulates past the still-decaying bar — nothing hard-blocks it
+    result = None
+    for i in range(4):
+        result = engine.on_detector_event(
+            final("keep talking in english for a while now ok", language="en", end_time=12.0 + i)
+        )
+        if isinstance(result, SwitchDecision):
+            break
+    assert isinstance(result, SwitchDecision)
+
+    # fully decayed: back to the base threshold (and the entry is dropped)
+    assert engine._reentry_multiplier("en", 250.0) == 1.0
+
+
+def test_manual_switch_is_stickier() -> None:
+    engine = make_engine(
+        switch_threshold=1.0,
+        reentry_threshold_multiplier=2.0,
+        manual_reentry_multiplier=4.0,
+        reentry_decay_s=100.0,
+        evidence_half_life_s=10_000.0,
+    )
+    engine.on_switch_started(LanguageCode("hi"))
+    engine.on_switch_completed(LanguageCode("hi"), initiator="manual")
+
+    # manual elevation starts higher than the heuristic one
+    assert engine._reentry_multiplier("en", 0.0) == 4.0
+
+    # one strong english sentence crosses the base threshold but not the manual bar
+    result = engine.on_detector_event(
+        final("hello how are you doing today my friend", language="en", end_time=30.0)
+    )
+    assert isinstance(result, SwitchSuppressed)
+    assert result.reason == "reentry"
+
+
+def test_allowlist_suppression() -> None:
+    engine = _HeuristicEngine(
+        LanguageSwitchOptions(switch_threshold=1.0),
+        LanguageCode("en"),
+        allowed={"en", "hi"},
+        now_fn=lambda: 0.0,
+    )
+    result = engine.on_detector_event(
+        final(SPANISH_LONG, language="es", confidence=0.95, end_time=1.0)
+    )
+    if result is None:
+        result = engine.on_detector_event(
+            final(SPANISH_LONG, language="es", confidence=0.95, end_time=2.0)
+        )
+    assert isinstance(result, SwitchSuppressed)
+    assert result.reason == "allowlist"
+    # the evidence is still visible in snapshots
+    snapshot = engine.evidence_snapshot_if_due()
+    assert snapshot is not None and "es" in snapshot
+
+
+def test_auto_switch_disabled_is_telemetry_only() -> None:
+    engine = make_engine(switch_threshold=1.0, auto_switch=False)
+    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))
+    result = engine.on_detector_event(final(HINDI_LONG, end_time=2.0))
+    assert isinstance(result, SwitchSuppressed)
+    assert result.reason == "auto_switch_disabled"
+
+
+def test_word_composition_scaling() -> None:
+    engine = make_engine(switch_threshold=100.0, turn_bonus=0.0, script_mismatch_boost=1.0)
+
+    def tagged_words(fraction_hi: float, n: int = 8) -> list[TimedString]:
+        n_hi = int(n * fraction_hi)
+        return [TimedString("w", language="hi" if i < n_hi else "en") for i in range(n)]
+
+    engine.on_detector_event(
+        final(HINDI_LONG, end_time=1.0, confidence=1.0, words=tagged_words(1.0))
+    )
+    pure_score = engine._evidence["hi"].score
+
+    engine2 = make_engine(switch_threshold=100.0, turn_bonus=0.0, script_mismatch_boost=1.0)
+    engine2.on_detector_event(
+        final(HINDI_LONG, end_time=1.0, confidence=1.0, words=tagged_words(0.5))
+    )
+    mixed_score = engine2._evidence["hi"].score
+
+    engine3 = make_engine(switch_threshold=100.0, turn_bonus=0.0, script_mismatch_boost=1.0)
+    engine3.on_detector_event(final(HINDI_LONG, end_time=1.0, confidence=1.0, words=None))
+    untagged_score = engine3._evidence["hi"].score
+
+    assert pure_score == untagged_score  # no tags -> neutral scale
+    assert mixed_score < pure_score  # code-mixed turn contributes less
+
+
+def test_snapshot_throttling() -> None:
+    engine = make_engine(switch_threshold=100.0, evidence_event_interval_s=5.0)
+    engine.on_detector_event(final(HINDI_LONG, end_time=1.0))
+    assert engine.evidence_snapshot_if_due() is not None
+    engine.on_detector_event(final(HINDI_LONG, end_time=2.0))
+    assert engine.evidence_snapshot_if_due() is None  # within the throttle window
+    engine.on_detector_event(final(HINDI_LONG, end_time=7.0))
+    assert engine.evidence_snapshot_if_due() is not None
+
+
+def test_multi_and_empty_language_ignored() -> None:
+    engine = make_engine(switch_threshold=0.1)
+    assert engine.on_detector_event(final(HINDI_LONG, language="multi", end_time=1.0)) is None
+    assert engine.on_detector_event(final(HINDI_LONG, language="", end_time=2.0)) is None
+    assert engine.on_detector_event(final("", language="hi", end_time=3.0)) is None
+
+
+def test_rescued_final_boost_adds_extra_evidence() -> None:
+    # a same-script final caps at 1.0 on arrival; when it is rescued (the primary was
+    # deaf to the whole utterance) it is re-scored up to rescued_final_boost
+    engine = make_engine(switch_threshold=1.4)
+    ev = final(SPANISH_LONG, language="es", confidence=1.0, end_time=1.0)
+    assert engine.on_detector_event(ev) is None  # 1.0 < 1.4
+
+    result = engine.on_final_rescued(ev)
+    assert isinstance(result, SwitchDecision)
+    assert result.reason == "rescued_final"
+    assert result.target == LanguageCode("es")
+    assert result.score == 1.5  # 1.0 credited on arrival + 0.5 rescue extra
+
+
+def test_rescued_final_crosses_elevated_reentry_bar() -> None:
+    # UAT regression (call 6aa91660...): after an en->es switch, "when does your sales
+    # open?" scored 0.99 against a 1.16 re-entry bar and did not revert even though the
+    # es-pinned primary heard nothing; the rescue boost must flip it on that sentence
+    engine = make_engine(
+        switch_threshold=1.0, reentry_threshold_multiplier=1.5, reentry_decay_s=60.0
+    )
+    engine.on_detector_event(final(SPANISH_LONG, language="es", confidence=1.0, end_time=42.0))
+    engine.on_switch_started(LanguageCode("es"))
+    engine.on_switch_completed(LanguageCode("es"), initiator="heuristic")
+
+    ev = final(
+        "yeah i have a question when do when does your sales open",
+        language="en",
+        confidence=0.99,
+        end_time=82.9,
+    )
+    assert engine.on_detector_event(ev) is None  # 0.99 < bar ~1.16
+
+    result = engine.on_final_rescued(ev)
+    assert isinstance(result, SwitchDecision)
+    assert result.reason == "rescued_final"
+    assert result.target == LanguageCode("en")
+
+
+def test_rescued_final_in_current_language_is_ignored() -> None:
+    # same-language rescues (short words the primary missed, e.g. a name) are not
+    # switch evidence
+    engine = make_engine(switch_threshold=1.0)
+    ev = final("hello there my friend how are you today", language="en", end_time=1.0)
+    assert engine.on_final_rescued(ev) is None
+    assert engine.evidence_snapshot_if_due() is None
+
+
+def test_rescued_cross_script_final_not_double_boosted() -> None:
+    # a cross-script final already carries the script boost on arrival; rescuing it
+    # must not stack another multiplier on top
+    engine = make_engine(switch_threshold=100.0)
+    ev = final(HINDI_LONG, end_time=1.0)
+    engine.on_detector_event(ev)
+    assert engine.on_final_rescued(ev) is None  # extra == 0

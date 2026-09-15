@@ -480,6 +480,11 @@ class SpeechStream(stt.SpeechStream):
 
     async def _run(self) -> None:
         closing_ws = False
+        # audio duration delivered to the current websocket connection: Deepgram
+        # timestamps are relative to the audio received on *that* connection, so an
+        # in-run reconnect (update_options) must add the audio already consumed by the
+        # closed connection to start_time_offset to keep timestamps continuous
+        conn_audio_sent = 0.0
 
         async def keepalive_task(ws: aiohttp.ClientWebSocketResponse) -> None:
             # if we want to keep the connection alive even if no audio is sent,
@@ -495,7 +500,7 @@ class SpeechStream(stt.SpeechStream):
 
         @utils.log_exceptions(logger=logger)
         async def send_task(ws: aiohttp.ClientWebSocketResponse) -> None:
-            nonlocal closing_ws
+            nonlocal closing_ws, conn_audio_sent
 
             # forward audio to deepgram in chunks of 50ms
             samples_50ms = self._opts.sample_rate // 20
@@ -517,6 +522,7 @@ class SpeechStream(stt.SpeechStream):
                 for frame in frames:
                     self._audio_duration_collector.push(frame.duration)
                     await ws.send_bytes(frame.data.tobytes())
+                    conn_audio_sent += frame.duration
 
                     if has_ended:
                         self._audio_duration_collector.flush()
@@ -585,6 +591,10 @@ class SpeechStream(stt.SpeechStream):
                         break
 
                     self._reconnect_event.clear()
+                    # the next connection's timestamps restart at 0: carry the audio
+                    # already sent forward so transcript timestamps stay continuous
+                    self._start_time_offset += conn_audio_sent
+                    conn_audio_sent = 0.0
                 finally:
                     await utils.aio.gracefully_cancel(*tasks, wait_reconnect_task)
                     tasks_group.cancel()
@@ -746,14 +756,16 @@ def live_transcription_to_speech_data(
                     start_time=word.get("start", 0) + start_time_offset,
                     end_time=word.get("end", 0) + start_time_offset,
                     start_time_offset=start_time_offset,
+                    language=word.get("language", NOT_GIVEN),
                 )
                 for word in alt["words"]
             ]
             if alt["words"]
             else None,
         )
-        if language == "multi" and "languages" in alt:
-            sd.language = LanguageCode(alt["languages"][0])  # TODO: handle multiple languages
+        if language == "multi" and alt.get("languages"):
+            sd.language = LanguageCode(alt["languages"][0])
+            sd.detected_languages = [LanguageCode(lang) for lang in alt["languages"]]
         speech_data.append(sd)
     return speech_data
 
