@@ -1,3 +1,86 @@
+"""Evidence scoring for automatic language switching.
+
+The engine consumes every *detector* transcript (the always-on multilingual stream) and
+accumulates per-language **evidence scores**. A switch fires when a candidate language's
+score crosses a **bar**. Everything below is pure and synchronous; all timing is *audio
+time* (seconds of audio pushed), never wall-clock — the input stream is gapped while the
+agent speaks.
+
+Units
+-----
+Evidence is denominated in **confident full utterances**: one final contributes at most
+1.0 before bonuses, so ``switch_threshold`` reads as "how many confident utterances'
+worth of evidence". Providers that fragment finals (aggressive endpointing) accumulate
+the same total across smaller contributions.
+
+Per-final pipeline (``on_detector_event``)
+------------------------------------------
+Each detector FINAL (interims only when ``interim_evidence_weight > 0``) passes gates,
+each of which contributes *nothing* and is visible in the trace log as ``gate=``:
+
+1. ``untagged``          — no language tag, or tagged ``multi``.
+2. ``current_language``  — matches the pinned language; also resets every candidate's
+                           consecutive-turn streak.
+3. ``too_short``         — at most ``min_transcript_length`` characters.
+4. ``low_confidence``    — below ``min_detector_confidence`` (a reported confidence of
+                           0.0 is replaced by ``default_confidence`` first).
+
+A surviving final contributes::
+
+    length_weight = min(n_words, word_length_cap) / word_length_cap      # 0..1
+    composition   = 0.5 + 0.5 * fraction_of_words_tagged_in_candidate    # 1.0 if untagged
+    boost         = script_mismatch_boost if cross-script else 1.0
+    if cross-script: length_weight = max(length_weight, cross_script_length_floor)
+
+    delta = min(boost, length_weight * confidence * composition * boost)
+    delta += turn_bonus                       # from the 2nd consecutive final onwards
+
+*Cross-script* means the text's dominant Unicode script does not belong to the pinned
+language (e.g. Devanagari on an ``en`` primary) — near-conclusive on its own, hence the
+floor (short fragments not discounted) and the raised per-final cap (a single confident
+sentence can cross bars above 1.0). Same-script finals cap at exactly 1.0.
+
+Accumulation and the bar
+------------------------
+Scores decay exponentially with ``evidence_half_life_s`` (lazily, on update). The bar a
+candidate must cross is::
+
+    bar = switch_threshold * reentry_multiplier(candidate)
+
+``reentry_multiplier`` is 1.0 normally. Right after a switch, the *switched-away*
+language starts at ``reentry_threshold_multiplier`` (``manual_reentry_multiplier`` for
+manual switches) and decays linearly to 1.0 over ``reentry_decay_s`` — hysteresis
+against flip-flop, never a hard block. Crossing ``switch_threshold`` while still under
+an elevated bar emits ``SwitchSuppressed("reentry")`` (observable, not acted on); the
+allowlist and ``auto_switch=False`` suppress the same way.
+
+Rescued finals (``on_final_rescued``)
+-------------------------------------
+A *rescued* final (see ``detector_rescue_s``) means the primary produced **no final at
+all** for speech the detector heard — a primary deaf to a whole utterance is
+near-conclusive mismatch evidence, same reasoning as cross-script. The final was already
+scored on arrival; the rescue re-scores it with ``rescued_final_boost`` as the
+multiplier/cap plus the length floor, credits the **difference**, and may itself return
+the switch decision (reason ``rescued_final``). This is what lets a single clear
+same-script sentence cross an elevated re-entry bar, which is otherwise impossible
+(per-final cap 1.0 < any elevated bar). Rescued cross-script finals gain nothing when
+``script_mismatch_boost >= rescued_final_boost`` (no double boost).
+
+Worked example (UAT call, en pinned, es+en configured, threshold 1.0, reentry 1.5/60s)
+--------------------------------------------------------------------------------------
+- ``"¿Tienen servicio de"`` (es, conf 1.00, 3 words): 3/8 × 1.00 = **0.37** < 1.0.
+- ``"transporte o vehículos …"`` (es, conf 1.00, 10 words, 2nd consecutive):
+  1.0 + 0.5 turn bonus = **1.50**; score 0.33 (decayed) + 1.50 = **1.86 ≥ 1.0 → switch**.
+- 38s later, ``"When does your sales open?"`` (en, conf 0.99, 12 words): delta capped at
+  **0.99**; bar = 1.0 × 1.16 (decayed re-entry) → no switch on arrival. The es-pinned
+  primary heard nothing, so the final is rescued: re-scored to 0.99 × 1.5 = 1.485,
+  extra **+0.50** → 1.49 ≥ 1.16 → **switch back** (reason ``rescued_final``).
+
+Every scored final emits an :class:`EventTrace`, logged by the adapter as
+``detector heard '…' lang= conf= delta= score= bar= [gate=]`` — the tuning trail for
+replaying any call.
+"""
+
 from __future__ import annotations
 
 import time
