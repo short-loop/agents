@@ -1,0 +1,568 @@
+"""Evidence scoring for automatic language switching.
+
+The engine consumes every *detector* transcript (the always-on multilingual stream) and
+accumulates per-language **evidence scores**. A switch fires when a candidate language's
+score crosses a **bar**. Everything below is pure and synchronous; all timing is *audio
+time* (seconds of audio pushed), never wall-clock — the input stream is gapped while the
+agent speaks.
+
+Units
+-----
+Evidence is denominated in **confident full utterances**: one final contributes at most
+1.0 before bonuses, so ``switch_threshold`` reads as "how many confident utterances'
+worth of evidence". Providers that fragment finals (aggressive endpointing) accumulate
+the same total across smaller contributions.
+
+Per-final pipeline (``on_detector_event``)
+------------------------------------------
+Each detector FINAL (interims only when ``interim_evidence_weight > 0``) passes gates,
+each of which contributes *nothing* and is visible in the trace log as ``gate=``:
+
+1. ``untagged``          — no language tag, or tagged ``multi``.
+2. ``current_language``  — matches the pinned language; also resets every candidate's
+                           consecutive-turn streak.
+3. ``too_short``         — at most ``min_transcript_length`` characters.
+4. ``low_confidence``    — below ``min_detector_confidence`` (a reported confidence of
+                           0.0 is replaced by ``default_confidence`` first).
+
+A surviving final contributes::
+
+    length_weight = min(n_words, word_length_cap) / word_length_cap      # 0..1
+    composition   = 0.5 + 0.5 * fraction_of_words_tagged_in_candidate    # 1.0 if untagged
+    boost         = script_mismatch_boost if cross-script else 1.0
+    if cross-script: length_weight = max(length_weight, cross_script_length_floor)
+
+    delta = min(boost, length_weight * confidence * composition * boost)
+    delta += turn_bonus                       # from the 2nd consecutive final onwards
+
+*Cross-script* means the text's dominant Unicode script does not belong to the pinned
+language (e.g. Devanagari on an ``en`` primary) — near-conclusive on its own, hence the
+floor (short fragments not discounted) and the raised per-final cap (a single confident
+sentence can cross bars above 1.0). Same-script finals cap at exactly 1.0.
+
+Accumulation and the bar
+------------------------
+Scores decay exponentially with ``evidence_half_life_s`` (lazily, on update). The bar a
+candidate must cross is::
+
+    bar = switch_threshold * reentry_multiplier(candidate)
+
+``reentry_multiplier`` is 1.0 normally. Right after a switch, the *switched-away*
+language starts at ``reentry_threshold_multiplier`` (``manual_reentry_multiplier`` for
+manual switches) and decays linearly to 1.0 over ``reentry_decay_s`` — hysteresis
+against flip-flop, never a hard block. Crossing ``switch_threshold`` while still under
+an elevated bar emits ``SwitchSuppressed("reentry")`` (observable, not acted on); the
+allowlist and ``auto_switch=False`` suppress the same way.
+
+Rescued finals (``on_final_rescued``)
+-------------------------------------
+A *rescued* final (see ``detector_rescue_s``) means the primary produced **no final at
+all** for speech the detector heard — a primary deaf to a whole utterance is
+near-conclusive mismatch evidence, same reasoning as cross-script. The final was already
+scored on arrival; the rescue re-scores it with ``rescued_final_boost`` as the
+multiplier/cap plus the length floor, credits the **difference**, and may itself return
+the switch decision (reason ``rescued_final``). This is what lets a single clear
+same-script sentence cross an elevated re-entry bar, which is otherwise impossible
+(per-final cap 1.0 < any elevated bar). Rescued cross-script finals gain nothing when
+``script_mismatch_boost >= rescued_final_boost`` (no double boost).
+
+Worked example (UAT call, en pinned, es+en configured, threshold 1.0, reentry 1.5/60s)
+--------------------------------------------------------------------------------------
+- ``"¿Tienen servicio de"`` (es, conf 1.00, 3 words): 3/8 × 1.00 = **0.37** < 1.0.
+- ``"transporte o vehículos …"`` (es, conf 1.00, 10 words, 2nd consecutive):
+  1.0 + 0.5 turn bonus = **1.50**; score 0.33 (decayed) + 1.50 = **1.86 ≥ 1.0 → switch**.
+- 38s later, ``"When does your sales open?"`` (en, conf 0.99, 12 words): delta capped at
+  **0.99**; bar = 1.0 × 1.16 (decayed re-entry) → no switch on arrival. The es-pinned
+  primary heard nothing, so the final is rescued: re-scored to 0.99 × 1.5 = 1.485,
+  extra **+0.50** → 1.49 ≥ 1.16 → **switch back** (reason ``rescued_final``).
+
+Every scored final emits an :class:`EventTrace`, logged by the adapter as
+``detector heard '…' lang= conf= delta= score= bar= [gate=]`` — the tuning trail for
+replaying any call.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
+
+from ...language import LanguageCode
+from ...types import NotGivenOr
+from ...utils import is_given
+from ..stt import SpeechData, SpeechEvent, SpeechEventType
+from .config import LanguageSwitchOptions
+
+# Unicode script ranges for the cross-script boost (signal 1). Coarse on purpose:
+# only letters matter, and only scripts that map unambiguously to language families.
+_SCRIPT_RANGES: list[tuple[int, int, str]] = [
+    (0x0041, 0x024F, "latin"),
+    (0x0370, 0x03FF, "greek"),
+    (0x0400, 0x04FF, "cyrillic"),
+    (0x0590, 0x05FF, "hebrew"),
+    (0x0600, 0x06FF, "arabic"),
+    (0x0750, 0x077F, "arabic"),
+    (0x0900, 0x097F, "devanagari"),
+    (0x0980, 0x09FF, "bengali"),
+    (0x0A00, 0x0A7F, "gurmukhi"),
+    (0x0A80, 0x0AFF, "gujarati"),
+    (0x0B80, 0x0BFF, "tamil"),
+    (0x0C00, 0x0C7F, "telugu"),
+    (0x0C80, 0x0CFF, "kannada"),
+    (0x0D00, 0x0D7F, "malayalam"),
+    (0x0E00, 0x0E7F, "thai"),
+    (0x1100, 0x11FF, "hangul"),
+    (0x3040, 0x30FF, "kana"),
+    (0x3400, 0x4DBF, "cjk"),
+    (0x4E00, 0x9FFF, "cjk"),
+    (0xAC00, 0xD7AF, "hangul"),
+]
+
+_LANG_TO_SCRIPTS: dict[str, frozenset[str]] = {
+    **dict.fromkeys(
+        (
+            "en",
+            "es",
+            "fr",
+            "de",
+            "it",
+            "pt",
+            "nl",
+            "pl",
+            "tr",
+            "vi",
+            "id",
+            "ms",
+            "sv",
+            "da",
+            "no",
+            "fi",
+            "cs",
+            "ro",
+            "hu",
+            "ca",
+            "sk",
+            "hr",
+            "tl",
+        ),
+        frozenset({"latin"}),
+    ),
+    **dict.fromkeys(("ru", "uk", "bg", "sr", "mk", "be"), frozenset({"cyrillic"})),
+    **dict.fromkeys(("hi", "mr", "ne", "sa"), frozenset({"devanagari"})),
+    "bn": frozenset({"bengali"}),
+    "pa": frozenset({"gurmukhi"}),
+    "gu": frozenset({"gujarati"}),
+    "ta": frozenset({"tamil"}),
+    "te": frozenset({"telugu"}),
+    "kn": frozenset({"kannada"}),
+    "ml": frozenset({"malayalam"}),
+    **dict.fromkeys(("ar", "fa", "ur"), frozenset({"arabic"})),
+    "he": frozenset({"hebrew"}),
+    "th": frozenset({"thai"}),
+    "ko": frozenset({"hangul"}),
+    "ja": frozenset({"kana", "cjk"}),
+    "zh": frozenset({"cjk"}),
+    "el": frozenset({"greek"}),
+}
+
+
+def _dominant_script(text: str) -> str | None:
+    counts: dict[str, int] = {}
+    for ch in text:
+        if not ch.isalpha():
+            continue
+        cp = ord(ch)
+        for lo, hi, script in _SCRIPT_RANGES:
+            if lo <= cp <= hi:
+                counts[script] = counts.get(script, 0) + 1
+                break
+
+    if not counts:
+        return None
+    return max(counts, key=lambda s: counts[s])
+
+
+def _is_cross_script(current: LanguageCode, text: str) -> bool:
+    expected = _LANG_TO_SCRIPTS.get(current.language)
+    if expected is None:
+        return False
+    dominant = _dominant_script(text)
+    return dominant is not None and dominant not in expected
+
+
+@dataclass
+class SwitchDecision:
+    """The engine decided the user switched language; the adapter should act."""
+
+    target: LanguageCode
+    score: float
+    reason: str
+    trigger_transcript: str
+    first_evidence_audio_ts: float
+    first_evidence_wall_ts: float
+
+
+@dataclass
+class SwitchSuppressed:
+    """Evidence crossed the threshold but the switch is blocked."""
+
+    target: LanguageCode
+    reason: Literal["reentry", "allowlist", "auto_switch_disabled"]
+    score: float
+
+
+@dataclass
+class EventTrace:
+    """Per-detector-final scoring trace (tuning/observability; consumed by the adapter)."""
+
+    text: str
+    language: str
+    confidence: float
+    delta: float
+    score: float
+    bar: float
+    gate: str | None  # why the final contributed nothing (None = it contributed)
+
+
+@dataclass
+class _Evidence:
+    score: float = 0.0
+    last_update_audio_ts: float = 0.0
+    first_evidence_audio_ts: float | None = None
+    first_evidence_wall_ts: float | None = None
+    consecutive_turns: int = 0
+
+
+class _HeuristicEngine:
+    """Pure, synchronous evidence accumulator for language-switch detection.
+
+    All timing is based on event timestamps (audio time), never wall-clock — the audio
+    stream is gapped while the agent speaks. ``now_fn`` exists only to stamp the
+    wall-clock latency metric and is injectable for tests.
+    """
+
+    def __init__(
+        self,
+        opts: LanguageSwitchOptions,
+        initial_language: LanguageCode,
+        *,
+        allowed: set[str] | None = None,
+        now_fn: Callable[[], float] = time.time,
+    ) -> None:
+        self._opts = opts
+        self._current = initial_language
+        self._allowed = allowed
+        self._now = now_fn
+
+        # all dicts keyed by base language (LanguageCode.language)
+        self._evidence: dict[str, _Evidence] = {}
+        self._target_codes: dict[str, LanguageCode] = {}
+        # switched-away languages under an elevated re-entry threshold:
+        # base -> (initial multiplier, switch audio_ts)
+        self._reentry: dict[str, tuple[float, float]] = {}
+        self._last_audio_ts: float = 0.0
+        self._last_snapshot_ts: float = float("-inf")
+        self._switch_inflight = False
+        self._last_trace: EventTrace | None = None
+
+    @property
+    def current_language(self) -> LanguageCode:
+        return self._current
+
+    @property
+    def last_audio_ts(self) -> float:
+        return self._last_audio_ts
+
+    def consume_trace(self) -> EventTrace | None:
+        """The scoring trace of the last detector final, cleared on read."""
+        trace, self._last_trace = self._last_trace, None
+        return trace
+
+    def on_detector_event(self, ev: SpeechEvent) -> SwitchDecision | SwitchSuppressed | None:
+        opts = self._opts
+        if ev.type == SpeechEventType.FINAL_TRANSCRIPT:
+            weight = 1.0
+            is_final = True
+        elif ev.type == SpeechEventType.INTERIM_TRANSCRIPT and opts.interim_evidence_weight > 0:
+            weight = opts.interim_evidence_weight
+            is_final = False
+        else:
+            return None
+
+        if not ev.alternatives:
+            return None
+
+        sd = ev.alternatives[0]
+        text = sd.text.strip()
+        if not text:
+            return None
+
+        audio_ts = max(sd.end_time, self._last_audio_ts)
+        self._last_audio_ts = audio_ts
+
+        base = sd.language.language if sd.language else ""
+
+        def _trace(delta: float, score: float, bar: float, gate: str | None) -> None:
+            # finetuning trace: what the detector heard and what it was worth
+            if is_final:
+                self._last_trace = EventTrace(
+                    text=text,
+                    language=base or str(sd.language or ""),
+                    confidence=sd.confidence,
+                    delta=delta,
+                    score=score,
+                    bar=bar,
+                    gate=gate,
+                )
+
+        def _bar(lang: str) -> float:
+            return opts.switch_threshold * self._reentry_multiplier(lang, audio_ts)
+
+        def _score(lang: str) -> float:
+            existing = self._evidence.get(lang)
+            return existing.score if existing else 0.0
+
+        if base in ("", "multi"):
+            _trace(0.0, 0.0, opts.switch_threshold, "untagged")
+            return None
+
+        if base == self._current.language:
+            # a turn in the current language breaks every candidate's streak
+            for evidence in self._evidence.values():
+                evidence.consecutive_turns = 0
+            _trace(0.0, 0.0, _bar(base), "current_language")
+            return None
+
+        if len(text) <= opts.min_transcript_length:
+            _trace(0.0, _score(base), _bar(base), "too_short")
+            return None
+
+        confidence = sd.confidence if sd.confidence > 0 else opts.default_confidence
+        if confidence < opts.min_detector_confidence:
+            _trace(0.0, _score(base), _bar(base), "low_confidence")
+            return None
+
+        evidence = self._evidence.setdefault(base, _Evidence(last_update_audio_ts=audio_ts))
+        self._target_codes[base] = sd.language
+        self._decay(evidence, audio_ts)
+
+        cross_script = _is_cross_script(self._current, text)
+        script_mult = opts.script_mismatch_boost if cross_script else 1.0
+
+        # evidence is denominated in "confident full utterances": one final contributes
+        # at most 1.0 before the turn bonus (up to script_mismatch_boost for
+        # cross-script finals, where a mismatched script is near-conclusive on its own),
+        # so switch_threshold reads as utterances
+        delta = self._final_delta(sd, text, base, boost=script_mult, floor=cross_script) * weight
+        if is_final:
+            evidence.consecutive_turns += 1
+            if evidence.consecutive_turns >= 2:
+                delta += opts.turn_bonus
+
+        evidence.score += delta
+        if evidence.first_evidence_audio_ts is None:
+            evidence.first_evidence_audio_ts = audio_ts
+            evidence.first_evidence_wall_ts = self._now()
+
+        _trace(delta, evidence.score, _bar(base), None)
+        return self._decide(base, evidence, audio_ts, trigger=text, reason="evidence_threshold")
+
+    def on_final_rescued(self, ev: SpeechEvent) -> SwitchDecision | SwitchSuppressed | None:
+        """Supplemental evidence for a rescued final (see ``rescued_final_boost``).
+
+        A rescued final means the primary produced no final for that speech — a primary
+        deaf to a whole utterance the detector heard confidently is near-conclusive
+        evidence of a language mismatch. The final was already scored on arrival; this
+        re-scores it with the rescued treatment (length floor, per-final cap raised to
+        the boost) and credits the difference, which may itself trigger the switch.
+        """
+        opts = self._opts
+        if opts.rescued_final_boost <= 1.0 or not ev.alternatives:
+            return None
+
+        sd = ev.alternatives[0]
+        text = sd.text.strip()
+        base = sd.language.language if sd.language else ""
+        if base in ("", "multi") or base == self._current.language:
+            return None
+        if len(text) <= opts.min_transcript_length:
+            return None
+        confidence = sd.confidence if sd.confidence > 0 else opts.default_confidence
+        if confidence < opts.min_detector_confidence:
+            return None
+
+        cross_script = _is_cross_script(self._current, text)
+        script_mult = opts.script_mismatch_boost if cross_script else 1.0
+        already = self._final_delta(sd, text, base, boost=script_mult, floor=cross_script)
+        boosted = self._final_delta(
+            sd, text, base, boost=max(script_mult, opts.rescued_final_boost), floor=True
+        )
+        extra = boosted - already
+        if extra <= 0:
+            return None
+
+        audio_ts = self._last_audio_ts
+        evidence = self._evidence.setdefault(base, _Evidence(last_update_audio_ts=audio_ts))
+        self._target_codes[base] = sd.language
+        self._decay(evidence, audio_ts)
+        evidence.score += extra
+        if evidence.first_evidence_audio_ts is None:
+            evidence.first_evidence_audio_ts = audio_ts
+            evidence.first_evidence_wall_ts = self._now()
+
+        self._last_trace = EventTrace(
+            text=text,
+            language=base,
+            confidence=sd.confidence,
+            delta=extra,
+            score=evidence.score,
+            bar=opts.switch_threshold * self._reentry_multiplier(base, audio_ts),
+            gate=None,
+        )
+        return self._decide(base, evidence, audio_ts, trigger=text, reason="rescued_final")
+
+    def _decide(
+        self, base: str, evidence: _Evidence, audio_ts: float, *, trigger: str, reason: str
+    ) -> SwitchDecision | SwitchSuppressed | None:
+        opts = self._opts
+        multiplier = self._reentry_multiplier(base, audio_ts)
+        threshold = opts.switch_threshold * multiplier
+        if evidence.score < threshold or self._switch_inflight:
+            # crossing the base threshold under an elevated re-entry bar stays observable
+            if (
+                not self._switch_inflight
+                and multiplier > 1.0
+                and evidence.score >= opts.switch_threshold
+            ):
+                return SwitchSuppressed(
+                    target=self._target_codes[base], reason="reentry", score=evidence.score
+                )
+            return None
+
+        target = self._target_codes[base]
+        if self._allowed is not None and base not in self._allowed:
+            return SwitchSuppressed(target=target, reason="allowlist", score=evidence.score)
+
+        if not opts.auto_switch:
+            return SwitchSuppressed(
+                target=target, reason="auto_switch_disabled", score=evidence.score
+            )
+
+        assert evidence.first_evidence_audio_ts is not None
+        assert evidence.first_evidence_wall_ts is not None
+        return SwitchDecision(
+            target=target,
+            score=evidence.score,
+            reason=reason,
+            trigger_transcript=trigger,
+            first_evidence_audio_ts=evidence.first_evidence_audio_ts,
+            first_evidence_wall_ts=evidence.first_evidence_wall_ts,
+        )
+
+    def _final_delta(
+        self, sd: SpeechData, text: str, base: str, *, boost: float, floor: bool
+    ) -> float:
+        """Per-final evidence contribution, before interim weighting and the turn bonus.
+
+        ``boost`` is both the evidence multiplier and the per-final cap; ``floor``
+        applies the cross-script length floor so near-conclusive short fragments are
+        not discounted.
+        """
+        opts = self._opts
+        confidence = sd.confidence if sd.confidence > 0 else opts.default_confidence
+        length_weight = min(len(text.split()), opts.word_length_cap) / opts.word_length_cap
+        if floor:
+            length_weight = max(length_weight, opts.cross_script_length_floor)
+        composition_scale = 1.0
+        fraction = self._word_language_fraction(sd.words, base)
+        if fraction is not None:
+            composition_scale = 0.5 + 0.5 * fraction
+        return min(boost, length_weight * confidence * composition_scale * boost)
+
+    def on_primary_event(self, ev: SpeechEvent) -> None:
+        # reserved for v2 signals (text-content mismatch)
+        pass
+
+    def on_switch_started(self, target: LanguageCode) -> None:
+        self._switch_inflight = True
+
+    def on_switch_completed(
+        self, new_language: LanguageCode, *, initiator: Literal["heuristic", "manual"]
+    ) -> None:
+        old = self._current
+        self._current = new_language
+        self._switch_inflight = False
+        self._evidence.clear()
+
+        multiplier = (
+            self._opts.manual_reentry_multiplier
+            if initiator == "manual"
+            else self._opts.reentry_threshold_multiplier
+        )
+        if old.language:
+            self._reentry[old.language] = (multiplier, self._last_audio_ts)
+        self._reentry.pop(new_language.language, None)
+
+    def on_switch_failed(self, target: LanguageCode) -> None:
+        self._switch_inflight = False
+        self._evidence.pop(target.language, None)
+        # elevated bar (not a hard block) against an immediate retry storm
+        self._reentry[target.language] = (
+            self._opts.reentry_threshold_multiplier,
+            self._last_audio_ts,
+        )
+
+    def evidence_snapshot_if_due(self) -> dict[str, float] | None:
+        if not self._evidence:
+            return None
+
+        if self._last_audio_ts - self._last_snapshot_ts < self._opts.evidence_event_interval_s:
+            return None
+
+        self._last_snapshot_ts = self._last_audio_ts
+        snapshot: dict[str, float] = {}
+        for base, evidence in self._evidence.items():
+            self._decay(evidence, self._last_audio_ts)
+            snapshot[base] = round(evidence.score, 4)
+        return snapshot
+
+    def _decay(self, evidence: _Evidence, audio_ts: float) -> None:
+        elapsed = audio_ts - evidence.last_update_audio_ts
+        if elapsed > 0 and self._opts.evidence_half_life_s > 0:
+            evidence.score *= 0.5 ** (elapsed / self._opts.evidence_half_life_s)
+        evidence.last_update_audio_ts = max(evidence.last_update_audio_ts, audio_ts)
+
+    def _reentry_multiplier(self, base: str, audio_ts: float) -> float:
+        entry = self._reentry.get(base)
+        if entry is None:
+            return 1.0
+
+        multiplier, since = entry
+        decay_s = self._opts.reentry_decay_s
+        elapsed = audio_ts - since
+        if elapsed >= decay_s or decay_s <= 0:
+            del self._reentry[base]
+            return 1.0
+
+        progress = elapsed / decay_s
+        return multiplier + progress * (1.0 - multiplier)
+
+    def _word_language_fraction(self, words: object, base: str) -> float | None:
+        """Fraction of language-tagged words in ``base``; None when no tags available."""
+        if not isinstance(words, list) or not words:
+            return None
+
+        tagged = 0
+        matching = 0
+        for word in words:
+            lang: NotGivenOr[str] = getattr(word, "language", None) or None  # type: ignore[assignment]
+            if lang is None or not is_given(lang) or not lang:
+                continue
+            tagged += 1
+            if LanguageCode(lang).language == base:
+                matching += 1
+
+        if tagged == 0:
+            return None
+        return matching / tagged
