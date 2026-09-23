@@ -611,15 +611,15 @@ class MultilingualRecognizeStream(RecognizeStream):
 
         # while the primary owns, keep detector finals for speech the session has not
         # received a (primary) final for yet: if a switch flips ownership, they are
-        # replayed so the utterance that triggered the switch is never lost
-        if (
-            self._owner == "primary"
-            and ev.type == SpeechEventType.FINAL_TRANSCRIPT
-            and has_text
-            and ev.alternatives[0].end_time > self._forwarded_final_end_ts
-        ):
-            self._pending_detector_finals.append(ev)
-            del self._pending_detector_finals[:-_PENDING_DETECTOR_FINALS_MAX]
+        # replayed so the utterance that triggered the switch is never lost. A final in
+        # another language is kept even when the watermark already covers it: the
+        # primary's "coverage" of foreign speech is garble, and the rescue watchdog
+        # decides its fate (see _dedupe_by_coverage)
+        if self._owner == "primary" and ev.type == SpeechEventType.FINAL_TRANSCRIPT and has_text:
+            sd = ev.alternatives[0]
+            if sd.end_time > self._forwarded_final_end_ts or not self._dedupe_by_coverage(sd):
+                self._pending_detector_finals.append(ev)
+                del self._pending_detector_finals[:-_PENDING_DETECTOR_FINALS_MAX]
 
         result = self._engine.on_detector_event(ev)
         trace = self._engine.consume_trace()
@@ -1034,10 +1034,7 @@ class MultilingualRecognizeStream(RecognizeStream):
                     break
                 self._pending_detector_finals.pop(0)
                 overlaps = sd.start_time + _RESCUE_COVERAGE_SLACK_S < self._forwarded_final_end_ts
-                same_language = (
-                    sd.language is not None and sd.language.language == self._language.language
-                )
-                if overlaps and same_language:
+                if overlaps and self._dedupe_by_coverage(sd):
                     # same speech, same language, two engines disagreeing on the end
                     # timestamp: the primary's version is trustworthy, this is a duplicate
                     logger.debug(
@@ -1089,7 +1086,30 @@ class MultilingualRecognizeStream(RecognizeStream):
                 e
                 for e in self._pending_detector_finals
                 if e.alternatives[0].end_time > self._forwarded_final_end_ts
+                or not self._dedupe_by_coverage(e.alternatives[0])
             ]
+
+    def _dedupe_by_coverage(self, sd: SpeechData) -> bool:
+        """Whether watermark coverage alone may drop this buffered detector final.
+
+        Coverage only proves the primary produced *a* final over that audio. For speech
+        in its own language that final is trustworthy and the detector's copy is a
+        duplicate. For speech in another language it is garble, so a *credible* foreign
+        final is never dropped on coverage alone and the rescue watchdog forwards it
+        (UAT calls 6ab3a2ef, 6ab3b5f6: "¿Habla español?" transcribed as "Good
+        afternoon."). Credible means it would pass the engine's evidence gates: tagged
+        with another language, longer than ``min_transcript_length`` and at or above
+        ``min_detector_confidence``. Anything else (untagged, same language, a short or
+        low-confidence mis-tag on a monolingual call) keeps the coverage dedupe so a
+        happy-path call never grows a duplicate user turn.
+        """
+        if sd.language is None or sd.language.language == self._language.language:
+            return True
+        opts = self._opts
+        if len(sd.text.strip()) <= opts.min_transcript_length:
+            return True
+        confidence = sd.confidence if sd.confidence > 0 else opts.default_confidence
+        return confidence < opts.min_detector_confidence
 
     def _replay_pending_finals(self) -> None:
         pending, self._pending_detector_finals = self._pending_detector_finals, []

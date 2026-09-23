@@ -387,6 +387,128 @@ async def test_detector_rescue_overlapping_mismatched_language_rescued() -> None
     await harness.aclose()
 
 
+async def test_detector_rescue_mismatched_language_survives_primary_prune() -> None:
+    # UAT regression (call 6ab3b5f6...): the detector's Spanish final arrived first and
+    # was buffered; 4ms later the en primary forwarded garbled English ("Good
+    # afternoon.") whose end_time covered it. The prune on forward must NOT discard a
+    # mismatched-language final by coverage alone — otherwise the rescue watchdog never
+    # sees it and neither the transcript nor the rescue boost reach the session
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    detector_stream.send_transcript(
+        "¿habla español?", language="es", start_time=0.1, end_time=end_time
+    )
+    await asyncio.sleep(0.01)
+    assert len(harness.stream._pending_detector_finals) == 1
+    # primary's garbled final ends LATER than the detector's: full coverage
+    primary_stream.send_transcript(
+        "good afternoon", language="en", start_time=0.1, end_time=end_time + 0.1
+    )
+    await harness.wait_for(lambda: "good afternoon" in harness.texts())
+    assert len(harness.stream._pending_detector_finals) == 1, "pruned by coverage"
+
+    await harness.wait_for(lambda: "¿habla español?" in harness.texts())
+
+    await harness.aclose()
+
+
+async def test_detector_rescue_mismatched_language_buffered_after_primary_final() -> None:
+    # the other ordering: the primary's garbled final is forwarded FIRST and advances
+    # the watermark, then the detector's covered Spanish final arrives. The buffer
+    # entry gate must still keep it so the watchdog can rescue it
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    primary_stream.send_transcript(
+        "good afternoon", language="en", start_time=0.1, end_time=end_time + 0.1
+    )
+    await harness.wait_for(lambda: "good afternoon" in harness.texts())
+    # fully covered by the watermark (end_time < forwarded end)
+    detector_stream.send_transcript(
+        "¿habla español?", language="es", start_time=0.1, end_time=end_time
+    )
+    await asyncio.sleep(0.01)
+    assert len(harness.stream._pending_detector_finals) == 1, "rejected at entry gate"
+
+    await harness.wait_for(lambda: "¿habla español?" in harness.texts())
+
+    await harness.aclose()
+
+
+async def test_detector_rescue_same_language_covered_final_not_buffered() -> None:
+    # control for the entry gate: a same-language final fully covered by the primary
+    # is a duplicate and must still be rejected on arrival (no rescue, no double turn)
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    primary_stream.send_transcript(
+        "good afternoon", language="en", start_time=0.1, end_time=end_time + 0.1
+    )
+    await harness.wait_for(lambda: "good afternoon" in harness.texts())
+    detector_stream.send_transcript(
+        "good afternoon", language="en", start_time=0.1, end_time=end_time
+    )
+    await asyncio.sleep(0.01)
+    assert harness.stream._pending_detector_finals == []
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= end_time + 1.0)
+    await asyncio.sleep(0.3)
+    assert harness.texts().count("good afternoon") == 1
+
+    await harness.aclose()
+
+
+async def test_detector_rescue_low_confidence_mismatch_still_deduped() -> None:
+    # happy-path guard: on a monolingual call the multi detector occasionally mis-tags
+    # a covered fragment with another language at low confidence; that must NOT be
+    # rescued as a duplicate user turn — only a credible foreign final escapes coverage
+    opts = dataclasses.replace(
+        FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0, min_detector_confidence=0.6
+    )
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    primary_stream.send_transcript(
+        "no thank you", language="en", start_time=0.1, end_time=end_time + 0.1
+    )
+    await harness.wait_for(lambda: "no thank you" in harness.texts())
+    detector_stream.send_transcript(
+        "no gracias", language="es", start_time=0.1, end_time=end_time, confidence=0.3
+    )
+    await asyncio.sleep(0.01)
+    assert harness.stream._pending_detector_finals == []
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= end_time + 1.0)
+    await asyncio.sleep(0.3)
+    assert "no gracias" not in harness.texts()
+
+    await harness.aclose()
+
+
 async def test_rescued_final_boost_triggers_switch() -> None:
     # a rescued final means the primary was deaf to the whole utterance: it is
     # re-scored with rescued_final_boost, which lets a single clear sentence cross a
