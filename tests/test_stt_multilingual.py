@@ -359,6 +359,34 @@ async def test_detector_rescue_drops_final_overlapping_forwarded() -> None:
     await harness.aclose()
 
 
+async def test_detector_rescue_overlapping_mismatched_language_rescued() -> None:
+    # UAT regression (call 6ab3a2ef...): the caller spoke Spanish, the en primary
+    # transcribed garbled English over the same audio and advanced the watermark; the
+    # detector's correct Spanish final must be rescued DESPITE the overlap (a duplicated
+    # garbled prefix is recoverable, lost speech is not) — only same-language overlaps
+    # are duplicates
+    opts = dataclasses.replace(FAST_OPTIONS, detector_rescue_s=0.3, switch_threshold=100.0)
+    adapter, primary, detector, _ = make_adapter(options=opts)
+    harness = Harness(adapter)
+    primary_stream = await primary.wait_for_stream()
+    detector_stream = await detector.wait_for_stream()
+    harness.start_pushing_audio()
+
+    await harness.wait_for(lambda: harness.stream._audio_clock >= 0.5)
+    end_time = harness.stream._audio_clock
+    primary_stream.send_transcript(
+        "have you guys been here", language="en", start_time=0.1, end_time=end_time
+    )
+    await harness.wait_for(lambda: "have you guys been here" in harness.texts())
+    detector_stream.send_transcript(
+        "¿habla español?", language="es", start_time=0.1, end_time=end_time + 0.2
+    )
+
+    await harness.wait_for(lambda: "¿habla español?" in harness.texts())
+
+    await harness.aclose()
+
+
 async def test_rescued_final_boost_triggers_switch() -> None:
     # a rescued final means the primary was deaf to the whole utterance: it is
     # re-scored with rescued_final_boost, which lets a single clear sentence cross a

@@ -1033,12 +1033,21 @@ class MultilingualRecognizeStream(RecognizeStream):
                 if self._audio_clock - sd.end_time < rescue_s:
                     break
                 self._pending_detector_finals.pop(0)
-                if sd.start_time + _RESCUE_COVERAGE_SLACK_S < self._forwarded_final_end_ts:
+                overlaps = sd.start_time + _RESCUE_COVERAGE_SLACK_S < self._forwarded_final_end_ts
+                same_language = (
+                    sd.language is not None and sd.language.language == self._language.language
+                )
+                if overlaps and same_language:
+                    # same speech, same language, two engines disagreeing on the end
+                    # timestamp: the primary's version is trustworthy, this is a duplicate
                     logger.debug(
                         "multilingual adapter: dropping buffered detector final that "
                         f"overlaps an already-forwarded final: {sd.text!r}"
                     )
                     continue
+                # a mismatched-language final is rescued even when it overlaps: the
+                # primary transcribed foreign speech as garble, and a duplicated garbled
+                # prefix is recoverable while lost speech is not
                 self._note_forwarded_final(ev)
                 logger.info(
                     "multilingual adapter: rescued detector final the primary never "
