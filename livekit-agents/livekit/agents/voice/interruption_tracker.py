@@ -45,6 +45,15 @@ class InterruptionBackoffOptions:
     state that applies only this playout silence gate (seconds) — no endpointing backoff.
     Covers collisions that occur before/between transient episodes at near-zero latency
     cost. ``None`` disables the primed state."""
+    primed_max_endpointing: float | None = None
+    """When set, replaces the session's ``max_endpointing_delay`` for EOU-unlikely turns
+    while primed. Confident turns keep the fast default delay; only uncertain (likely
+    mid-sentence) turns wait longer, reducing premature commits that manufacture the
+    second interruption. ``None`` keeps the stock cap."""
+    normal_disable_preemptive: bool = False
+    """Disable preemptive generation while in normal mode (no interruptions yet).
+    Preemptive replies start audio sooner after a turn commit, shrinking the window in
+    which a resuming caller cancels the pending reply silently instead of audibly."""
     transient: InterruptionModeSettings = field(
         default_factory=lambda: InterruptionModeSettings(
             backoff_delay=4.0, unlikely_threshold=0.3, silence_gate=1.0
@@ -183,5 +192,7 @@ class InterruptionTracker:
         return settings.silence_gate
 
     def preemptive_disabled(self) -> bool:
+        if self._opts is not None and self._mode is InterruptionMode.NORMAL:
+            return self._opts.normal_disable_preemptive
         settings = self._active_settings()
         return settings is not None and settings.disable_preemptive
