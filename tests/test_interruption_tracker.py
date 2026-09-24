@@ -199,3 +199,34 @@ def test_total_interruptions_counter() -> None:
     _turn(tracker)
     _turn(tracker, interruptions=1)
     assert tracker.total_interruptions == 3
+
+
+def test_normal_disable_preemptive() -> None:
+    tracker = InterruptionTracker(
+        InterruptionBackoffOptions(primed_silence_gate=2.0, normal_disable_preemptive=True)
+    )
+    assert tracker.mode is InterruptionMode.NORMAL
+    assert tracker.preemptive_disabled()
+    # primed re-enables preemptive (gate protects playout there)
+    tracker.record_interruption()
+    assert tracker.mode is InterruptionMode.PRIMED
+    assert not tracker.preemptive_disabled()
+
+
+def test_normal_preemptive_enabled_by_default() -> None:
+    tracker = InterruptionTracker(PRIMED_OPTS)
+    assert not tracker.preemptive_disabled()
+    # tracker disabled entirely: flag is never consulted
+    assert not InterruptionTracker(None).preemptive_disabled()
+
+
+def test_sustained_preemptive_override() -> None:
+    opts = InterruptionBackoffOptions(
+        sustained_entry_total=4,
+        sustained=InterruptionModeSettings(
+            backoff_delay=4.0, unlikely_threshold=0.8, silence_gate=3.5, disable_preemptive=False
+        ),
+    )
+    tracker = InterruptionTracker(opts)
+    assert _turn(tracker, interruptions=4) is InterruptionMode.SUSTAINED
+    assert not tracker.preemptive_disabled()

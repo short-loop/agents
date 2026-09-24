@@ -778,6 +778,7 @@ class AudioRecognition:
             mode_threshold: float | None = None
             mode_backoff: float | None = None
             mode_name = ""
+            primed_max_endpointing: float | None = None
             if backoff_opts is not None and mode is InterruptionMode.TRANSIENT:
                 mode_threshold = backoff_opts.transient.unlikely_threshold
                 mode_backoff = backoff_opts.transient.backoff_delay
@@ -786,6 +787,8 @@ class AudioRecognition:
                 mode_threshold = backoff_opts.sustained.unlikely_threshold
                 mode_backoff = backoff_opts.sustained.backoff_delay
                 mode_name = "sustained"
+            elif backoff_opts is not None and mode is InterruptionMode.PRIMED:
+                primed_max_endpointing = backoff_opts.primed_max_endpointing
 
             if _ends_with_number_like(self._audio_transcript):
                 endpointing_delay = self._max_endpointing_delay
@@ -849,6 +852,9 @@ class AudioRecognition:
                                 if mode_backoff is not None:
                                     endpointing_delay = mode_backoff
                                     delay_reason = f"{mode_name}_backoff"
+                                elif primed_max_endpointing is not None:
+                                    endpointing_delay = primed_max_endpointing
+                                    delay_reason = "primed_backoff"
                                 else:
                                     endpointing_delay = self._max_endpointing_delay
                                     delay_reason = "eou_unlikely"
