@@ -41,6 +41,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
         num_channels: int,
         track_publish_options: rtc.TrackPublishOptions,
         track_name: str = "roomio_audio",
+        max_volume: float = 1.0,
     ) -> None:
         super().__init__(
             label="RoomIO",
@@ -50,6 +51,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
         )
         self._room = room
         self._track_name = track_name
+        self._max_volume = max_volume  # fork(P11)
         self._lock = asyncio.Lock()
         self._audio_source = rtc.AudioSource(sample_rate, num_channels, queue_size_ms=200)
         self._publish_options = track_publish_options
@@ -276,6 +278,22 @@ class _ParticipantAudioOutput(io.AudioOutput):
         self._first_frame_event.clear()
         self.on_playback_finished(playback_position=pushed_duration, interrupted=interrupted)
 
+    def _scale_volume(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
+        """fork(P11): attenuate playout to ``max_volume`` (no-op at 1.0)."""
+        if self._max_volume >= 1.0:
+            return frame
+        import numpy as np
+
+        data = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32)
+        data *= self._max_volume
+        data = np.clip(data, -32768, 32767).astype(np.int16)
+        return rtc.AudioFrame(
+            data=data.tobytes(),
+            sample_rate=frame.sample_rate,
+            num_channels=frame.num_channels,
+            samples_per_channel=frame.samples_per_channel,
+        )
+
     async def _forward_audio(self) -> None:
         async for frame in self._audio_buf:
             interruption_generation = self._interruption_generation
@@ -312,6 +330,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
                     self._report_run(offset=self._source_pushed_duration, ended_at=self._dry_at)
 
                 self._source_pushed_duration += frame.duration
+                frame = self._scale_volume(frame)  # fork(P11)
                 await self._audio_source.capture_frame(frame)
                 self._dry_at = time.time() + self._audio_source.queued_duration
             finally:
