@@ -176,6 +176,8 @@ class TimedString(str):
             absence of a speaker is a routine, expected case across all
             providers — not a "not given" boundary condition — and downstream
             consumers gate on ``speaker_id is None`` rather than ``is_given``.
+        language: Per-word detected language, multilingual STT models only
+            (NOT_GIVEN when unavailable). fork: read by stt.MultilingualAdapter.
     """
 
     start_time: NotGivenOr[float]
@@ -183,6 +185,7 @@ class TimedString(str):
     confidence: NotGivenOr[float]
     start_time_offset: NotGivenOr[float]
     speaker_id: str | None
+    language: NotGivenOr[str]
 
     def __new__(
         cls,
@@ -192,6 +195,7 @@ class TimedString(str):
         confidence: NotGivenOr[float] = NOT_GIVEN,
         start_time_offset: NotGivenOr[float] = NOT_GIVEN,
         speaker_id: str | None = None,
+        language: NotGivenOr[str] = NOT_GIVEN,
     ) -> "TimedString":
         obj = super().__new__(cls, text)
         obj.start_time = start_time
@@ -199,4 +203,5 @@ class TimedString(str):
         obj.confidence = confidence
         obj.start_time_offset = start_time_offset
         obj.speaker_id = speaker_id
+        obj.language = language
         return obj

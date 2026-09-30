@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from livekit.agents.language import LanguageCode
 from livekit.agents.stt import LanguageSwitchOptions, SpeechData, SpeechEvent, SpeechEventType
 from livekit.agents.stt.multilingual.heuristics import (
@@ -9,6 +11,8 @@ from livekit.agents.stt.multilingual.heuristics import (
     _is_cross_script,
 )
 from livekit.agents.types import TimedString
+
+pytestmark = pytest.mark.unit
 
 
 def final(
