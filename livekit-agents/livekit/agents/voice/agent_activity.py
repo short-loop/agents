@@ -327,6 +327,19 @@ def _record_queue_wait(speech_handle: SpeechHandle) -> None:
 
 
 # NOTE: AgentActivity isn't exposed to the public API
+def _set_bracket_stripping(model: llm.LLM | llm.RealtimeModel | None, *, enabled: bool) -> None:
+    """fork(P2): inference.LLM truncates streamed text at [; that must be off while a
+    turn runs expressive mode, whose TTS markup is bracketed. Adapters are unwrapped."""
+    if isinstance(model, inference.LLM):
+        model.update_options(strip_brackets=enabled)
+    elif isinstance(model, llm.ParallelAdapter):
+        for entry in model._entries:
+            _set_bracket_stripping(entry.llm, enabled=enabled)
+    elif isinstance(model, llm.FallbackAdapter):
+        for instance in model._llm_instances:
+            _set_bracket_stripping(instance, enabled=enabled)
+
+
 class AgentActivity(RecognitionHooks):
     def __init__(self, agent: Agent, sess: AgentSession) -> None:
         self._agent, self._session = agent, sess
@@ -3482,6 +3495,7 @@ class AgentActivity(RecognitionHooks):
 
         # inject expressive instructions (TTS markup guide + speaker context)
         _expr_opts = self._resolve_expressive_options()
+        _set_bracket_stripping(self.llm, enabled=_expr_opts is None)  # fork(P2)
         if _expr_opts is not None:
             self._inject_expressive_instructions(chat_ctx, _expr_opts, speech_handle)
         else:

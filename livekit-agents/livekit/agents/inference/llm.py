@@ -220,6 +220,10 @@ class _LLMOptions:
     api_secret: str
     inference_class: InferenceClass | None
     extra_kwargs: ChatCompletionOptions | dict[str, Any]
+    strip_brackets: bool
+    """fork(P2): truncate streamed text at the first [ so citation-style markers
+    ([1], [source]) are never spoken. AgentActivity turns this off for expressive
+    turns, whose TTS markup is bracketed."""
 
 
 class LLM(llm.LLM):
@@ -233,6 +237,7 @@ class LLM(llm.LLM):
         api_secret: str | None = None,
         inference_class: InferenceClass | None = None,
         extra_kwargs: ChatCompletionOptions | dict[str, Any] | None = None,
+        strip_brackets: bool = True,
     ) -> None:
         super().__init__()
 
@@ -248,6 +253,7 @@ class LLM(llm.LLM):
             api_secret=lk_api_secret,
             inference_class=inference_class,
             extra_kwargs=extra_kwargs or {},
+            strip_brackets=strip_brackets,
         )
         self._client = openai.AsyncClient(
             api_key=create_access_token(self._opts.api_key, self._opts.api_secret),
@@ -279,6 +285,7 @@ class LLM(llm.LLM):
         *,
         model: NotGivenOr[LLMModels | str] = NOT_GIVEN,
         extra_kwargs: NotGivenOr[ChatCompletionOptions | dict[str, Any]] = NOT_GIVEN,
+        strip_brackets: NotGivenOr[bool] = NOT_GIVEN,
     ) -> None:
         """Update LLM configuration options.
 
@@ -291,6 +298,8 @@ class LLM(llm.LLM):
             self._opts.model = model
         if is_given(extra_kwargs):
             self._opts.extra_kwargs = dict(extra_kwargs)
+        if is_given(strip_brackets):
+            self._opts.strip_brackets = strip_brackets
 
     @property
     def model(self) -> str:
@@ -517,6 +526,12 @@ class LLMStream(llm.LLMStream):
         delta.content = llm_utils.strip_thinking_tokens(
             delta.content, thinking_filter, final=choice.finish_reason is not None
         )
+
+        # fork(P2): strip bracket artifacts (e.g. citation markers like [1], [source])
+        if delta.content and self._llm._opts.strip_brackets:
+            bracket_pos = delta.content.find("[")
+            if bracket_pos != -1:
+                delta.content = delta.content[:bracket_pos]
 
         if delta.tool_calls:
             for tool in delta.tool_calls:
