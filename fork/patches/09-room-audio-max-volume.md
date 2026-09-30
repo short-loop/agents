@@ -3,9 +3,10 @@
 | | |
 |---|---|
 | **Status** | Opt-in (default 1.0 = no change) |
-| **Origin** | Fork commit `d7081f0` (short-loop/agents#56, "chore: migrate sl patches") |
+| **Origin** | 1.4.6: fork commit `d7081f0` (short-loop/agents#56). 1.8.3: `01a880b0b` (P11) |
 | **Depends on** | — |
 | **Automated tests** | None |
+| **Code markers** | `fork(patch 09)` |
 
 ## Why
 
@@ -33,7 +34,9 @@ the agent's published audio at the room output without touching TTS settings.
 - `livekit-agents/livekit/agents/voice/room_io/_output.py`: `_ParticipantAudioOutput`
   accepts `max_volume` (keyword, default 1.0), stores it, has a `_scale_volume(frame)`
   helper (imports numpy lazily), and applies it in `_forward_audio` immediately before
-  `capture_frame`, after the first-frame / playback-started bookkeeping.
+  `capture_frame`, after the first-frame / playback-started bookkeeping and upstream's
+  `_source_pushed_duration` accounting (1.8 rewrote the loop around pause/resume and
+  dry-source reporting; the insertion point is unchanged).
 
 ## Re-applying the patch
 

@@ -3,7 +3,8 @@
 | | |
 |---|---|
 | **Status** | Always-on for the Deepgram STT plugin (bug fix) |
-| **Origin** | Fork commit `e58f51d` (short-loop/agents#60, "fix(stt): keep transcript timestamps continuous across STT reconnects") |
+| **Origin** | 1.4.6: fork commit `e58f51d` (short-loop/agents#60). 1.8.3: part of `d751a2ac1` (P10) |
+| **Code markers** | comments starting with `fork:` inside `SpeechStream._run` |
 | **Depends on** | — |
 | **Required by** | Patch 13 (dedup watermark shared between primary and detector) |
 | **Automated tests** | None directly for the plugin change; `tests/test_stt_multilingual.py::test_recreate_child_anchored_to_audio_clock` covers the adapter-side counterpart |
@@ -65,7 +66,9 @@ regressed" warning in logs after such a change.
 ## Known caveats
 
 - Only covers reconnects driven by `_reconnect_event` inside one `_run`. This patch does
-  not change what happens on a full `_run` retry by the base `RecognizeStream`. Inside
+  not change what happens on a full `_run` retry by the base `RecognizeStream`, which
+  since 1.5 adds the **wall-clock** gap between runs to `_start_time_offset` in
+  `_main_task` — a different mechanism for a different event; both stay. Inside
   the multilingual adapter, children created later (shadows, detector restarts, rebuilds
   after a retry) are anchored to the session audio clock by the adapter itself
   (patch 13).
