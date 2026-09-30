@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import math
+import re
 import time
 from collections import deque
 from collections.abc import AsyncIterable, Callable, Iterator
@@ -119,6 +120,24 @@ class _EndOfTurnMetrics:
     end_of_turn_delay: float | None
 
 
+# --- fork(P4): crutch-word guards while the agent speaks --------------------------------
+
+_STRIP_PATTERN = re.compile(r"[\W_]+")
+
+
+def _strip_word(word: str) -> str:
+    return _STRIP_PATTERN.sub("", word.lower().strip())
+
+
+DEFAULT_BACKCHANNEL_WORDS: set[str] = {
+    "", "uh", "um", "ugh", "uhh", "oof", "aye", "hi", "hello", "okay", "ok", "yes", "yeah",
+    "ya", "sure", "yep", "yup", "hm", "hmm", "hmmm", "hmmmm", "mm", "mhm", "mmhmm", "mhmm",
+    "mhmmm", "mmhmmm", "mmmhmm", "uhuh", "uhhuh", "huh", "eh", "ah", "aah", "aaah",
+}  # fmt: skip
+
+_STRIPPED_BACKCHANNEL_WORDS: set[str] = {_strip_word(w) for w in DEFAULT_BACKCHANNEL_WORDS}
+
+
 @dataclass
 class _EndOfTurnInfo:
     skip_reply: bool
@@ -209,6 +228,7 @@ class RecognitionHooks(Protocol):
     def on_agent_backchannel_opportunity(self, ev: _AgentBackchannelOpportunityEvent) -> None: ...
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def on_user_turn_exceeded(self, ev: UserTurnExceededEvent) -> None: ...
+    def on_commit_word(self, transcript: str) -> None: ...  # fork(P4)
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
 
 
@@ -387,6 +407,18 @@ class AudioRecognition:
         self._backchannel_boundary_timer: asyncio.TimerHandle | None = None
         self._backchannel_boundary_callback: Callable[[], None] | None = None
         # endregion
+
+        # fork(P4): crutch-word guards (None -> built-in default list / disabled)
+        _bc_words = session.options.interruption.get("backchannel_words")
+        self._backchannel_words: set[str] = (
+            {_strip_word(w) for w in _bc_words}
+            if _bc_words is not None
+            else _STRIPPED_BACKCHANNEL_WORDS
+        )
+        _commit_words = session.options.interruption.get("commit_words")
+        self._commit_words: set[str] = (
+            {_strip_word(w) for w in _commit_words} if _commit_words else set()
+        )
 
         self._user_turn_span: trace.Span | None = None
         self._user_turn_start: float | None = None
@@ -1176,6 +1208,14 @@ class AudioRecognition:
         self._commit_user_turn_atask.add_done_callback(_on_task_done)
         return fut
 
+    def is_backchannel_word(self, word: str) -> bool:
+        """fork(P4)"""
+        return _strip_word(word) in self._backchannel_words
+
+    def is_commit_word(self, word: str) -> bool:
+        """fork(P4)"""
+        return bool(self._commit_words) and _strip_word(word) in self._commit_words
+
     def _check_stale_speaking_anchor(self) -> None:
         """fork(P6, D9): warn when ``_last_speaking_time`` predates the previous final, i.e.
         the VAD never refreshed the anchor between two finals. The 1.4.6 fork also forced the
@@ -1590,6 +1630,25 @@ class AudioRecognition:
         if self._stt and not self._audio_transcript and self._turn_detection_mode != "manual":
             # stt enabled but no transcript yet
             return
+
+        # fork(P4): while the agent speaks, a lone commit word is recorded as a user turn
+        # without interrupting, and a lone backchannel word is neither an interruption
+        # nor a turn (the transcript is dropped)
+        if self._stt and self._agent_speaking and self._turn_detection_mode != "manual":
+            words = self._current_transcript.strip().split()
+            if len(words) == 1:
+                word = words[0]
+                if self.is_commit_word(word):
+                    logger.debug(
+                        "commit word detected, adding to context", extra={"lk.pii.word": word}
+                    )
+                    self._hooks.on_commit_word(self._audio_transcript)
+                    self._audio_transcript = ""
+                    return
+                if self.is_backchannel_word(word):
+                    logger.debug("backchannel word detected, ignoring", extra={"lk.pii.word": word})
+                    self._audio_transcript = ""
+                    return
 
         chat_ctx = chat_ctx.copy()
         if self._audio_transcript:

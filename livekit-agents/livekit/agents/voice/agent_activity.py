@@ -2345,6 +2345,21 @@ class AgentActivity(RecognitionHooks):
         interruption_options = self._session.options.interruption
         if (
             self.stt is not None
+            and self._audio_recognition is not None
+            and self._session.agent_state == "speaking"
+        ):
+            # fork(P4): a lone backchannel word ("okay", "mhm") over agent speech is not an
+            # interruption; a commit word still is (it is recorded by the recognition path)
+            _words = split_words(self._audio_recognition._current_transcript, split_character=True)
+            if (
+                len(_words) == 1
+                and self._audio_recognition.is_backchannel_word(_words[0][0])
+                and not self._audio_recognition.is_commit_word(_words[0][0])
+            ):
+                return
+
+        if (
+            self.stt is not None
             and interruption_options["min_words"] > 0
             and self._audio_recognition is not None
         ):
@@ -3013,6 +3028,13 @@ class AgentActivity(RecognitionHooks):
     # AudioRecognition is calling this method to retrieve the chat context before running the TurnDetector model  # noqa: E501
     def retrieve_chat_ctx(self) -> llm.ChatContext:
         return self._agent.chat_ctx
+
+    def on_commit_word(self, transcript: str) -> None:
+        """fork(P4): record a lone commit word as a user turn without a reply, the same way
+        a skip_reply turn is stored."""
+        user_message = llm.ChatMessage(role="user", content=[transcript])
+        self._agent._chat_ctx.items.append(user_message)
+        self._session._conversation_item_added(user_message)
 
     # endregion
 

@@ -185,6 +185,15 @@ class InterruptionOptions(TypedDict, total=False):
     different values for start and end separately. ``None`` disables. Defaults
     to ``(1.0, 1.0)``. The end value preserves transcripts received near the
     end of agent speech."""
+    backchannel_words: set[str] | None
+    """fork(P4): a single-word transcript in this set ("okay", "mhm") while the agent
+    speaks neither interrupts it nor commits a user turn. Words are compared
+    lowercased with punctuation stripped. ``None`` uses the built-in default list.
+    Applies in both interruption modes."""
+    commit_words: set[str] | None
+    """fork(P4): a single-word transcript in this set while the agent speaks is recorded
+    as a user turn without interrupting. Takes precedence over ``backchannel_words``.
+    ``None`` disables."""
 
 
 _INTERRUPTION_DEFAULTS: InterruptionOptions = {
@@ -195,6 +204,8 @@ _INTERRUPTION_DEFAULTS: InterruptionOptions = {
     "resume_false_interruption": True,
     "false_interruption_timeout": 2.0,
     "backchannel_boundary": (1.0, 1.0),
+    "backchannel_words": None,
+    "commit_words": None,
 }
 
 
