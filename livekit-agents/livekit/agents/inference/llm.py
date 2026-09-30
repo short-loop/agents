@@ -398,6 +398,8 @@ class LLMStream(llm.LLMStream):
         self._strict_tool_schema = strict_tool_schema
         self._client = client
         self._llm = llm_v
+        # fork(P2): read once per request, like the other options
+        self._strip_brackets = llm_v._opts.strip_brackets if isinstance(llm_v, LLM) else False
         self._extra_kwargs = drop_unsupported_params(model, extra_kwargs, tools=tools)
         self._tool_ctx = llm.ToolContext(tools)
 
@@ -528,7 +530,7 @@ class LLMStream(llm.LLMStream):
         )
 
         # fork(P2): strip bracket artifacts (e.g. citation markers like [1], [source])
-        if delta.content and self._llm._opts.strip_brackets:
+        if delta.content and self._strip_brackets:
             bracket_pos = delta.content.find("[")
             if bracket_pos != -1:
                 delta.content = delta.content[:bracket_pos]
