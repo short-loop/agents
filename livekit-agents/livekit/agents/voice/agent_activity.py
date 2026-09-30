@@ -98,6 +98,7 @@ from .generation import (
     update_expressive_instructions,
     update_instructions,
 )
+from .interruption_tracker import InterruptionTracker
 from .speech_handle import DEFAULT_INPUT_DETAILS, InputDetails, InterruptionSource, SpeechHandle
 from .tool_executor import _resolve_async_tool_options, _RunningTasks, _ToolExecutor
 from .turn import (
@@ -2614,7 +2615,9 @@ class AgentActivity(RecognitionHooks):
         preemptive_opts = self.preemptive_generation_opts
         if (
             not preemptive_opts["enabled"]
-            or self._session._interruption_tracker.preemptive_disabled()  # fork(P9)
+            or (
+                (_t := self._backoff_tracker()) is not None and _t.preemptive_disabled()
+            )  # fork(P9)
             or self._scheduling_paused
             or self._new_turns_blocked
             or (self._current_speech is not None and not self._current_speech.interrupted)
@@ -3039,10 +3042,23 @@ class AgentActivity(RecognitionHooks):
     # AudioRecognition is calling this method to retrieve the chat context before running the TurnDetector model  # noqa: E501
     # region fork(P9): interruption-backoff playout hold + latency logs
 
+    def _backoff_tracker(self) -> InterruptionTracker | None:
+        # explicit type check: tests stub the session/activity with mocks and fakes
+        tracker = getattr(self._session, "_interruption_tracker", None)
+        return tracker if isinstance(tracker, InterruptionTracker) else None
+
+    def _backoff_mode_name(self) -> str:
+        tracker = self._backoff_tracker()
+        return tracker.mode.value if tracker is not None else "normal"
+
     def _update_backoff_hold(self, silence: float | None) -> None:
         """Open or close the playout hold from the accumulated user silence. ``None`` means
         no VAD evidence: the hold opens (fails soft)."""
-        gate = self._session._interruption_tracker.silence_gate()
+        hold = getattr(self, "_backoff_hold_event", None)
+        if hold is None:
+            return
+        tracker = self._backoff_tracker()
+        gate = tracker.silence_gate() if tracker is not None else None
         if gate is None or silence is None or silence > gate:
             self._backoff_hold_event.set()
             self._backoff_hold_closed_at = None
@@ -3060,7 +3076,7 @@ class AgentActivity(RecognitionHooks):
             "playout held by silence gate",
             extra={
                 "held": round(time.time() - closed_at, 3),
-                "interruption_mode": self._session._interruption_tracker.mode.value,
+                "interruption_mode": self._backoff_mode_name(),
                 "speech_id": speech_handle.id,
                 "interrupted_while_held": speech_handle.interrupted,
             },
@@ -3092,7 +3108,7 @@ class AgentActivity(RecognitionHooks):
                 ),
                 "llm_ttft": round(llm_ttft, 3) if llm_ttft is not None else None,
                 "tts_ttfb": round(tts_ttfb, 3) if tts_ttfb is not None else None,
-                "interruption_mode": self._session._interruption_tracker.mode.value,
+                "interruption_mode": self._backoff_mode_name(),
                 "speech_id": speech_handle.id,
             },
         )
@@ -3265,7 +3281,7 @@ class AgentActivity(RecognitionHooks):
         )
         audio_output = self._session.output.audio if self._session.output.audio_enabled else None
 
-        _hold_closed_at = self._backoff_hold_closed_at  # fork(P9)
+        _hold_closed_at = getattr(self, "_backoff_hold_closed_at", None)  # fork(P9)
         # See discussion in https://github.com/livekit/agents/issues/4432
         authorization_tasks: list[asyncio.Future[Any]] = [
             asyncio.ensure_future(speech_handle._wait_for_authorization()),
@@ -3273,9 +3289,8 @@ class AgentActivity(RecognitionHooks):
         ]
         if speech_handle.allow_interruptions:
             authorization_tasks.append(asyncio.ensure_future(self._user_silence_event.wait()))
-            authorization_tasks.append(
-                asyncio.ensure_future(self._backoff_hold_event.wait())
-            )  # fork(P9)
+            if (_hold := getattr(self, "_backoff_hold_event", None)) is not None:  # fork(P9)
+                authorization_tasks.append(asyncio.ensure_future(_hold.wait()))
         await speech_handle.wait_if_not_interrupted(authorization_tasks)
         speech_handle._clear_authorization()
         _record_queue_wait(speech_handle)
@@ -3761,16 +3776,15 @@ class AgentActivity(RecognitionHooks):
 
         self._session._update_agent_state("thinking")
 
-        _hold_closed_at = self._backoff_hold_closed_at  # fork(P9)
+        _hold_closed_at = getattr(self, "_backoff_hold_closed_at", None)  # fork(P9)
         authorization_tasks: list[asyncio.Future[Any]] = [
             asyncio.ensure_future(speech_handle._wait_for_authorization()),
             asyncio.ensure_future(self._authorization_allowed.wait()),
         ]
         if speech_handle.allow_interruptions:
             authorization_tasks.append(asyncio.ensure_future(self._user_silence_event.wait()))
-            authorization_tasks.append(
-                asyncio.ensure_future(self._backoff_hold_event.wait())
-            )  # fork(P9)
+            if (_hold := getattr(self, "_backoff_hold_event", None)) is not None:  # fork(P9)
+                authorization_tasks.append(asyncio.ensure_future(_hold.wait()))
         await speech_handle.wait_if_not_interrupted(authorization_tasks)
         speech_handle._clear_authorization()
         _record_queue_wait(speech_handle)
@@ -4191,9 +4205,8 @@ class AgentActivity(RecognitionHooks):
         ]
         if speech_handle.allow_interruptions and not self._rt_overlapping_speech_enabled:
             authorization_tasks.append(asyncio.ensure_future(self._user_silence_event.wait()))
-            authorization_tasks.append(
-                asyncio.ensure_future(self._backoff_hold_event.wait())
-            )  # fork(P9)
+            if (_hold := getattr(self, "_backoff_hold_event", None)) is not None:  # fork(P9)
+                authorization_tasks.append(asyncio.ensure_future(_hold.wait()))
         await speech_handle.wait_if_not_interrupted(authorization_tasks)
         # the queue wait is recorded by _realtime_generation_task, which owns the agent_turn span
         if speech_handle.interrupted:
@@ -4421,9 +4434,8 @@ class AgentActivity(RecognitionHooks):
         ]
         if speech_handle.allow_interruptions and not self._rt_overlapping_speech_enabled:
             authorization_tasks.append(asyncio.ensure_future(self._user_silence_event.wait()))
-            authorization_tasks.append(
-                asyncio.ensure_future(self._backoff_hold_event.wait())
-            )  # fork(P9)
+            if (_hold := getattr(self, "_backoff_hold_event", None)) is not None:  # fork(P9)
+                authorization_tasks.append(asyncio.ensure_future(_hold.wait()))
         await speech_handle.wait_if_not_interrupted(authorization_tasks)
         speech_handle._clear_authorization()
         _record_queue_wait(speech_handle)
