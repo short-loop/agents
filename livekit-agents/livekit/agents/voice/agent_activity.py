@@ -17,6 +17,7 @@ from livekit.agents.llm.realtime import MessageGeneration
 from livekit.agents.metrics.base import Metadata
 
 from .. import inference, llm, stt, tts, utils, vad
+from ..language import LanguageCode
 from ..llm.chat_context import Instructions
 from ..llm.realtime_fallback_adapter import _FallbackRealtimeSession
 from ..llm.tool_context import (
@@ -328,7 +329,7 @@ def _record_queue_wait(speech_handle: SpeechHandle) -> None:
 
 # NOTE: AgentActivity isn't exposed to the public API
 def _set_bracket_stripping(model: llm.LLM | llm.RealtimeModel | None, *, enabled: bool) -> None:
-    """fork(P2): inference.LLM truncates streamed text at [; that must be off while a
+    """fork(P2): inference.LLM truncates streamed text at ``[``; that must be off while a
     turn runs expressive mode, whose TTS markup is bracketed. Adapters are unwrapped."""
     if isinstance(model, inference.LLM):
         model.update_options(strip_brackets=enabled)
@@ -702,6 +703,13 @@ class AgentActivity(RecognitionHooks):
     @property
     def current_speech(self) -> SpeechHandle | None:
         return self._current_speech
+
+    @property
+    def get_last_user_language(self) -> LanguageCode | None:
+        """fork(P8): see :attr:`AgentSession.get_last_user_language`."""
+        if self._audio_recognition is None:
+            return None
+        return self._audio_recognition.get_last_user_language
 
     @property
     def tools(

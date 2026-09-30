@@ -221,8 +221,8 @@ class _LLMOptions:
     inference_class: InferenceClass | None
     extra_kwargs: ChatCompletionOptions | dict[str, Any]
     strip_brackets: bool
-    """fork(P2): truncate streamed text at the first [ so citation-style markers
-    ([1], [source]) are never spoken. AgentActivity turns this off for expressive
+    """fork(P2): truncate streamed text at the first ``[`` so citation-style markers
+    (``[1]``, ``[source]``) are never spoken. AgentActivity turns this off for expressive
     turns, whose TTS markup is bracketed."""
 
 

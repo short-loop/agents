@@ -33,6 +33,7 @@ from livekit.protocol.agent_pb import agent_session as agent_pb
 from .. import cli, inference, llm, stt, tts, utils, vad
 from .._exceptions import APIError
 from ..job import get_job_context
+from ..language import LanguageCode
 from ..llm import (
     LLM,
     AgentHandoff,
@@ -832,6 +833,14 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
     @property
     def tools(self) -> list[llm.Tool | llm.Toolset]:
         return self._tools
+
+    @property
+    def get_last_user_language(self) -> LanguageCode | None:
+        """fork(P8): the last language the STT detected for the user, or None before the
+        first tagged transcript. Used by apps to switch TTS voice / prompt language."""
+        if self._activity is None:
+            return None
+        return self._activity.get_last_user_language
 
     @property
     def usage(self) -> AgentSessionUsage:

@@ -51,7 +51,7 @@ from .turn import (
 if TYPE_CHECKING:
     from .agent_session import AgentSession
 
-MIN_LANGUAGE_DETECTION_LENGTH = 5
+MIN_LANGUAGE_DETECTION_LENGTH = 3  # fork(P7): upstream 5; short regional finals must update
 _NON_SPECIFIC_LANGUAGE_CODES = frozenset({"auto", "multi"})
 # Mirrors turn_detector.base.MAX_HISTORY_TURNS for tracing
 _EOU_MAX_HISTORY_TURNS = 6
@@ -1120,6 +1120,11 @@ class AudioRecognition:
         self._commit_user_turn_atask = asyncio.create_task(_commit_user_turn())
         self._commit_user_turn_atask.add_done_callback(_on_task_done)
         return fut
+
+    @property
+    def get_last_user_language(self) -> LanguageCode | None:
+        """fork(P8): last language tag reported by the STT for this user."""
+        return self._last_language
 
     @property
     def _current_transcript(self) -> str:
