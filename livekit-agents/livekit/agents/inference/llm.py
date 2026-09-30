@@ -375,6 +375,8 @@ class LLM(llm.LLM):
 
 
 class LLMStream(llm.LLMStream):
+    _strip_brackets: bool = False  # fork(P2): default for streams built without __init__
+
     def __init__(
         self,
         llm_v: LLM | llm.LLM,

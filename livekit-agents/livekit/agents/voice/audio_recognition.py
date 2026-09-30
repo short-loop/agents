@@ -314,6 +314,9 @@ class _STTPipeline:
 
 
 class AudioRecognition:
+    # fork(P6): class default so partially constructed instances (tests) still work
+    _second_last_final_transcript_time: float | None = None
+
     def __init__(
         self,
         session: AgentSession,
@@ -1694,12 +1697,13 @@ class AudioRecognition:
             delay_reason = "default"
             use_raw_delay = False
 
-            if _ends_with_number_like(self._audio_transcript):
+            readout_rules = self._endpointing.readout_rules is True
+            if readout_rules and _ends_with_number_like(self._audio_transcript):
                 # fork(P5): callers reading numbers pause between groups
                 endpointing_delay = self._endpointing.max_delay
                 delay_reason = "ends_with_number"
                 use_raw_delay = True
-            elif _ends_with_alpha_numeric(self._audio_transcript):
+            elif readout_rules and _ends_with_alpha_numeric(self._audio_transcript):
                 endpointing_delay = max(self._endpointing.max_delay - 1.0, endpointing_delay)
                 delay_reason = "ends_with_alphanumeric"
                 use_raw_delay = True
@@ -1871,20 +1875,28 @@ class AudioRecognition:
             if eou_wait_span.is_recording():  # the wait may have ended with resumed speech
                 eou_wait_span.set_attribute(trace_types.ATTR_EOU_DELAY, endpointing_delay)
 
-            # fork(P6): an anchored delay that already elapsed falls back to the raw delay
-            # (stale anchor), and the sleep is floored at 0.5s when the configured minimum
-            # is itself >= 0.5s, so a late transcript never commits the turn instantly
+            # fork(P6): opt-in (EndpointingOptions.stale_anchor_raw_delay / sleep_floor):
+            # an anchored delay that already elapsed may fall back to the raw delay, and
+            # the sleep may be floored so a late transcript never commits the turn instantly
             if use_raw_delay or not last_speaking_time:
                 extra_sleep = endpointing_delay
-            elif last_speaking_time + endpointing_delay - time.time() < 0:
+            elif (
+                self._endpointing.stale_anchor_raw_delay is True
+                and last_speaking_time + endpointing_delay - time.time() < 0
+            ):
                 logger.debug(
                     "last_speaking_time appears stale, defaulting to raw endpointing delay"
                 )
                 extra_sleep = endpointing_delay
             else:
                 extra_sleep = last_speaking_time + endpointing_delay - time.time()
-            if self._endpointing.min_delay >= 0.5 > extra_sleep:
-                extra_sleep = 0.5
+            # explicit type checks: tests may stub the endpointing object with a MagicMock
+            sleep_floor = self._endpointing.sleep_floor
+            if (
+                isinstance(sleep_floor, (int, float))
+                and self._endpointing.min_delay >= sleep_floor > extra_sleep
+            ):
+                extra_sleep = float(sleep_floor)
             logger.info(
                 "eou sleep",
                 extra={

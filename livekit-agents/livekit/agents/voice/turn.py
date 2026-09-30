@@ -130,6 +130,20 @@ class EndpointingOptions(TypedDict, total=False):
     """Exponential moving average coefficient for dynamic endpointing.
     The higher the value, the more weight is given to the history.
     Defaults to ``0.9``. Only applies when mode is ``dynamic``."""
+    sleep_floor: float | None
+    """fork(P6): minimum wait (s) after the last transcript before the turn is committed,
+    regardless of how long the user has already been silent, so a late transcript never
+    commits the turn instantly. Only applied when ``min_delay`` is at least this value.
+    ``None`` (default) keeps upstream behaviour."""
+    stale_anchor_raw_delay: bool
+    """fork(P6): when the delay anchored to the last speaking time has already elapsed
+    (late transcript or stale VAD anchor), wait the raw endpointing delay instead of
+    committing at once. Defaults to ``False`` (upstream behaviour)."""
+    readout_rules: bool
+    """fork(P5): a transcript ending in 2+ number words waits ``max_delay`` and a trailing
+    4-word alphanumeric/NATO sequence waits ``max_delay - 1``, both unanchored and ahead of
+    the EOU model, so callers reading numbers are not cut off between groups. Defaults to
+    ``True``."""
 
 
 _ENDPOINTING_DEFAULTS: EndpointingOptions = {
@@ -137,6 +151,9 @@ _ENDPOINTING_DEFAULTS: EndpointingOptions = {
     "min_delay": 0.5,
     "max_delay": 3.0,
     "alpha": 0.9,
+    "sleep_floor": None,
+    "stale_anchor_raw_delay": False,
+    "readout_rules": True,
 }
 
 _STREAMING_ENDPOINTING_DEFAULTS: EndpointingOptions = {
@@ -144,6 +161,9 @@ _STREAMING_ENDPOINTING_DEFAULTS: EndpointingOptions = {
     "min_delay": 0.3,
     "max_delay": 2.5,
     "alpha": 0.9,
+    "sleep_floor": None,
+    "stale_anchor_raw_delay": False,
+    "readout_rules": True,
 }
 
 
