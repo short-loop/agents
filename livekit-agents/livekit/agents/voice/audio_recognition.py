@@ -52,6 +52,58 @@ if TYPE_CHECKING:
     from .agent_session import AgentSession
 
 MIN_LANGUAGE_DETECTION_LENGTH = 3  # fork(P7): upstream 5; short regional finals must update
+
+# --- fork(P5): endpointing rules for digit / alphanumeric read-outs ---------------------
+
+_NUMBER_WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
+_NUMBER_WORDS_EXTENDED = _NUMBER_WORDS | {"ten"}
+_MILITARY_LETTERS = {
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+    "juliett", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+    "sierra", "tango", "uniform", "victor", "whiskey", "yankee", "zulu",
+}  # fmt: skip
+
+
+def _ends_with_number_like(transcript: str) -> bool:
+    """True if the transcript ends with 2+ consecutive number words (a digit read-out)."""
+    try:
+        words = transcript.rstrip(".,!?").lower().split()
+        count = 0
+        for word in reversed(words):
+            if word.isdigit() or word in _NUMBER_WORDS:
+                count += 1
+                if count >= 2:
+                    return True
+            else:
+                break
+        return False
+    except Exception:
+        logger.exception("Error in _ends_with_number_like")
+        return False
+
+
+def _ends_with_alpha_numeric(transcript: str) -> bool:
+    """True if the last four words form an alphanumeric sequence with at least one number."""
+    try:
+        words = transcript.rstrip(".,!?").lower().split()
+        if len(words) < 4:
+            return False
+        last_four = words[-4:]
+
+        def is_num(w: str) -> bool:
+            return w.isdigit() or w in _NUMBER_WORDS_EXTENDED
+
+        def is_char(w: str) -> bool:
+            return (len(w) == 1 and w.isalpha()) or w in _MILITARY_LETTERS
+
+        if not all(is_num(w) or is_char(w) for w in last_four):
+            return False
+        return any(is_num(w) for w in last_four)
+    except Exception:
+        logger.exception("Error in _ends_with_alpha_numeric")
+        return False
+
+
 _NON_SPECIFIC_LANGUAGE_CODES = frozenset({"auto", "multi"})
 # Mirrors turn_detector.base.MAX_HISTORY_TURNS for tracing
 _EOU_MAX_HISTORY_TURNS = 6
@@ -282,6 +334,9 @@ class AudioRecognition:
         self._user_silence_ev.set()
 
         self._last_final_transcript_time: float | None = None
+        # fork(P6): the final before the last one, to detect a speaking anchor that the VAD
+        # never refreshed between two finals
+        self._second_last_final_transcript_time: float | None = None
         self._last_speaking_time: float | None = None
         self._speech_start_time: float | None = None
 
@@ -1121,6 +1176,27 @@ class AudioRecognition:
         self._commit_user_turn_atask.add_done_callback(_on_task_done)
         return fut
 
+    def _check_stale_speaking_anchor(self) -> None:
+        """fork(P6, D9): warn when ``_last_speaking_time`` predates the previous final, i.e.
+        the VAD never refreshed the anchor between two finals. The 1.4.6 fork also forced the
+        anchor to ``now`` and applied the raw endpointing delay; on 1.8 this is
+        detection-only until prod logs show the case still occurs (MIGRATION-1.8.md, D9)."""
+        if (
+            self._last_speaking_time is not None
+            and self._second_last_final_transcript_time is not None
+            and self._last_speaking_time < self._second_last_final_transcript_time
+        ):
+            logger.warning(
+                "stale last_speaking_time detected",
+                extra={
+                    "last_speaking_time": self._last_speaking_time,
+                    "second_last_final_transcript_time": self._second_last_final_transcript_time,
+                    "lag": round(
+                        self._second_last_final_transcript_time - self._last_speaking_time, 3
+                    ),
+                },
+            )
+
     @property
     def get_last_user_language(self) -> LanguageCode | None:
         """fork(P8): last language tag reported by the STT for this user."""
@@ -1236,6 +1312,7 @@ class AudioRecognition:
                 extra["transcript_delay"] = time.time() - self._last_speaking_time
             logger.debug("received user transcript", extra=extra)
 
+            self._second_last_final_transcript_time = self._last_final_transcript_time
             self._last_final_transcript_time = time.time()
             self._audio_transcript += f" {transcript}"
             self._audio_transcript = self._audio_transcript.lstrip()
@@ -1246,6 +1323,7 @@ class AudioRecognition:
 
             if use_stt_speaking_time:
                 self._last_speaking_time = stt_last_speaking_time
+            self._check_stale_speaking_anchor()  # fork(P6)
 
             # check user turn limit after accumulating transcript
             self._check_user_turn_limit(transcript)
@@ -1301,6 +1379,7 @@ class AudioRecognition:
 
             if use_stt_speaking_time:
                 self._last_speaking_time = stt_last_speaking_time
+            self._check_stale_speaking_anchor()  # fork(P6)
 
             if self._turn_detection_mode != "manual" or self._user_turn_committed:
                 confidence_vals = list(self._final_transcript_confidence) + [confidence]
@@ -1550,8 +1629,22 @@ class AudioRecognition:
             end_of_turn_probability: float | None = None
             unlikely_threshold: float | None = None
             backchannel_threshold: float | None = None
+            from_cache = False
+            # fork(P5/P6): why this delay was chosen (one INFO line per decision, see below);
+            # raw delays ignore the speaking anchor on purpose
+            delay_reason = "default"
+            use_raw_delay = False
 
-            if turn_detector is not None:
+            if _ends_with_number_like(self._audio_transcript):
+                # fork(P5): callers reading numbers pause between groups
+                endpointing_delay = self._endpointing.max_delay
+                delay_reason = "ends_with_number"
+                use_raw_delay = True
+            elif _ends_with_alpha_numeric(self._audio_transcript):
+                endpointing_delay = max(self._endpointing.max_delay - 1.0, endpointing_delay)
+                delay_reason = "ends_with_alphanumeric"
+                use_raw_delay = True
+            elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.info("Turn detector does not support language %s", self._last_language)
                 else:
@@ -1611,6 +1704,7 @@ class AudioRecognition:
                             and end_of_turn_probability < unlikely_threshold
                         ):
                             endpointing_delay = self._endpointing.max_delay
+                            delay_reason = "eou_unlikely"  # fork(P6)
 
                         eou_span_attributes: dict[str, Any] = {
                             trace_types.ATTR_CHAT_CTX: json.dumps(
@@ -1718,9 +1812,34 @@ class AudioRecognition:
             if eou_wait_span.is_recording():  # the wait may have ended with resumed speech
                 eou_wait_span.set_attribute(trace_types.ATTR_EOU_DELAY, endpointing_delay)
 
-            extra_sleep = endpointing_delay
-            if last_speaking_time:
-                extra_sleep += last_speaking_time - time.time()
+            # fork(P6): an anchored delay that already elapsed falls back to the raw delay
+            # (stale anchor), and the sleep is floored at 0.5s when the configured minimum
+            # is itself >= 0.5s, so a late transcript never commits the turn instantly
+            if use_raw_delay or not last_speaking_time:
+                extra_sleep = endpointing_delay
+            elif last_speaking_time + endpointing_delay - time.time() < 0:
+                logger.debug(
+                    "last_speaking_time appears stale, defaulting to raw endpointing delay"
+                )
+                extra_sleep = endpointing_delay
+            else:
+                extra_sleep = last_speaking_time + endpointing_delay - time.time()
+            if self._endpointing.min_delay >= 0.5 > extra_sleep:
+                extra_sleep = 0.5
+            logger.info(
+                "eou sleep",
+                extra={
+                    "delay": round(extra_sleep, 3),
+                    "reason": delay_reason,
+                    "endpointing_delay": round(endpointing_delay, 3),
+                    "last_speaking_time": last_speaking_time,
+                    "use_raw_delay": use_raw_delay,
+                    "trigger": trigger,
+                    "from_cache": from_cache,
+                    "end_of_turn_probability": end_of_turn_probability,
+                    "unlikely_threshold": unlikely_threshold,
+                },
+            )
             delay_completed = False
             if extra_sleep > 0:
                 try:
