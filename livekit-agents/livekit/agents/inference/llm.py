@@ -422,6 +422,9 @@ class LLMStream(llm.LLMStream):
             if not self._tools:
                 # remove tool_choice from extra_kwargs if no tools are provided
                 self._extra_kwargs.pop("tool_choice", None)
+                # fork(P1): parallel_tool_calls without tools is rejected by some providers
+                # (e.g. Azure OpenAI)
+                self._extra_kwargs.pop("parallel_tool_calls", None)
 
             extra_headers = self._extra_kwargs.setdefault("extra_headers", {})
             extra_headers.update(get_inference_headers(inference_class=self._inference_class))
