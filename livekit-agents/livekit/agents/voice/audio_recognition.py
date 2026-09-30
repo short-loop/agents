@@ -41,6 +41,7 @@ from .events import (
     UserTurnExceededEvent,
     _AgentBackchannelOpportunityEvent,
 )
+from .interruption_tracker import InterruptionMode, InterruptionTracker
 from .turn import (
     TurnDetectionEvent,
     TurnDetectionMode as TurnDetectionMode,
@@ -1872,6 +1873,43 @@ class AudioRecognition:
                                 prediction_event.detection_delay,
                             )
 
+            # fork(P9): interruption-backoff modes. Flat per-mode delays layered on top of
+            # whatever endpointing object is active (fixed or dynamic); confident turns keep
+            # the fast delay, uncertain ones (below max(model threshold, mode threshold)) or
+            # turns without a prediction pay the mode backoff. Primed only raises the cap.
+            tracker = getattr(self._session, "_interruption_tracker", None)
+            interruption_mode = InterruptionMode.NORMAL
+            if isinstance(tracker, InterruptionTracker) and tracker.enabled:
+                interruption_mode = tracker.mode
+                mode_name = interruption_mode.value
+                backoff_params = tracker.backoff_params()
+                if use_raw_delay:
+                    if backoff_params is not None and backoff_params[1] > endpointing_delay:
+                        endpointing_delay = backoff_params[1]
+                        delay_reason = f"{delay_reason}+{mode_name}_backoff"
+                elif backoff_params is not None:
+                    mode_threshold, mode_backoff = backoff_params
+                    if end_of_turn_probability is None:
+                        # no turn detector, unsupported language, failed or timed-out prediction
+                        endpointing_delay = mode_backoff
+                        delay_reason = f"{mode_name}_backoff_no_eou"
+                    else:
+                        effective_threshold = (
+                            mode_threshold
+                            if unlikely_threshold is None
+                            else max(unlikely_threshold, mode_threshold)
+                        )
+                        if end_of_turn_probability < effective_threshold:
+                            endpointing_delay = mode_backoff
+                            delay_reason = f"{mode_name}_backoff"
+                elif (
+                    interruption_mode is InterruptionMode.PRIMED
+                    and delay_reason == "eou_unlikely"
+                    and (primed_cap := tracker.primed_max_endpointing()) is not None
+                ):
+                    endpointing_delay = primed_cap
+                    delay_reason = "primed_backoff"
+
             if eou_wait_span.is_recording():  # the wait may have ended with resumed speech
                 eou_wait_span.set_attribute(trace_types.ATTR_EOU_DELAY, endpointing_delay)
 
@@ -1909,6 +1947,7 @@ class AudioRecognition:
                     "from_cache": from_cache,
                     "end_of_turn_probability": end_of_turn_probability,
                     "unlikely_threshold": unlikely_threshold,
+                    "interruption_mode": interruption_mode.value,
                 },
             )
             delay_completed = False

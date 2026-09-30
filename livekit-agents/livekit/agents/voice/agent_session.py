@@ -81,6 +81,7 @@ from .events import (
     UserState,
     UserStateChangedEvent,
 )
+from .interruption_tracker import InterruptionBackoffOptions, InterruptionTracker
 from .ivr import IVRActivity
 from .keyterm_detection import (
     KeytermDetector,
@@ -327,6 +328,11 @@ class AgentSessionOptions:
     def preemptive_generation(self) -> PreemptiveGenerationOptions:
         return self.turn_handling["preemptive_generation"]
 
+    @property
+    def interruption_backoff(self) -> InterruptionBackoffOptions | None:
+        """fork(P9)"""
+        return self.turn_handling.get("interruption_backoff")
+
 
 Userdata_T = TypeVar("Userdata_T")
 Run_T = TypeVar("Run_T")
@@ -397,6 +403,8 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         tts: NotGivenOr[tts.TTS | TTSModels | str] = NOT_GIVEN,
         turn_handling: NotGivenOr[TurnHandlingOptions] = NOT_GIVEN,
         stt_context_options: NotGivenOr[STTContextOptions] = NOT_GIVEN,
+        # fork(P9): alias of turn_handling["interruption_backoff"] (the kwarg wins)
+        interruption_backoff: NotGivenOr[InterruptionBackoffOptions | None] = NOT_GIVEN,
         # Tool settings
         tools: NotGivenOr[list[llm.Tool | llm.Toolset]] = NOT_GIVEN,
         tool_handling: NotGivenOr[ToolHandlingOptions] = NOT_GIVEN,
@@ -576,6 +584,11 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         else:
             stt_context = None
         user_turn_limit = _resolve_user_turn_limit(turn_handling.get("user_turn_limit"))
+        interruption_backoff_opts = (  # fork(P9)
+            interruption_backoff
+            if is_given(interruption_backoff)
+            else turn_handling.get("interruption_backoff")
+        )
         self._aec_warmup_duration_explicit = is_given(aec_warmup_duration)
         resolved_aec_warmup_duration = (
             aec_warmup_duration if is_given(aec_warmup_duration) else _DEFAULT_AEC_WARMUP_DURATION
@@ -590,6 +603,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
                 turn_detection=raw_turn_detection,
                 preemptive_generation=preemptive_gen,
                 user_turn_limit=user_turn_limit,
+                interruption_backoff=interruption_backoff_opts,
             ),
             stt_context_options=_resolve_stt_context_options(stt_context),
             endpointing_overrides=endpointing_overrides,
@@ -696,6 +710,8 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
         self._agent: Agent | None = None
         self._activity: AgentActivity | None = None
+        # fork(P9): per-session (survives agent handoffs) interruption pattern tracking
+        self._interruption_tracker = InterruptionTracker(self._opts.interruption_backoff)
         self._next_activity: AgentActivity | None = None
         self._user_state: UserState = "listening"
         self._agent_state: AgentState = "initializing"
@@ -2303,6 +2319,23 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
     def _conversation_item_added(self, message: llm.ChatMessage) -> None:
         self._chat_ctx.insert(message)
+
+        # fork(P9): an interruption is an assistant item committed interrupted with spoken
+        # text; mode transitions are evaluated at user-turn commits
+        if self._interruption_tracker.enabled and (message.text_content or "").strip():
+            if message.role == "assistant" and message.interrupted:
+                self._interruption_tracker.record_interruption()
+            elif message.role == "user":
+                old_mode = self._interruption_tracker.mode
+                new_mode = self._interruption_tracker.record_user_turn()
+                if (
+                    new_mode is not old_mode
+                    and self._interruption_tracker.preemptive_disabled()
+                    and self._activity is not None
+                ):
+                    # an already in-flight preemptive generation must not survive mode entry
+                    self._activity._cancel_preemptive_generation()
+
         if text := message.raw_text_content:
             logger.debug(
                 "conversation_item_added",

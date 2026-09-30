@@ -17,6 +17,7 @@ from ..types import (
     NotGivenOr,
 )
 from ..utils import is_given
+from .interruption_tracker import InterruptionBackoffOptions
 
 
 @dataclass
@@ -315,6 +316,13 @@ class TurnHandlingOptions(TypedDict, total=False):
     """Preemptive generation configuration. Use ``{"enabled": False}`` to disable."""
     user_turn_limit: UserTurnLimitOptions
     """User turn limit configuration. Use ``{"max_words": 50}`` to enable."""
+    interruption_backoff: InterruptionBackoffOptions | None
+    """fork(P9, SL-3890): interruption-backoff modes. When the conversation shows a
+    pattern of the agent being interrupted (assistant items committed with
+    ``interrupted=True``), the session enters primed / transient / sustained modes that hold
+    playout until enough user silence, lengthen endpointing for low-confidence turns and can
+    disable preemptive generation. ``None`` (default) disables the feature. Independent of
+    the ``endpointing`` mode: it only reads the active endpointing object's delays."""
 
 
 def _resolve_preemptive_generation(
