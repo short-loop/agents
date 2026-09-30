@@ -221,7 +221,7 @@ class _LLMOptions:
     inference_class: InferenceClass | None
     extra_kwargs: ChatCompletionOptions | dict[str, Any]
     strip_brackets: bool
-    """fork(P2): truncate streamed text at the first ``[`` so citation-style markers
+    """fork(patch 08): truncate streamed text at the first ``[`` so citation-style markers
     (``[1]``, ``[source]``) are never spoken. AgentActivity turns this off for expressive
     turns, whose TTS markup is bracketed."""
 
@@ -375,7 +375,7 @@ class LLM(llm.LLM):
 
 
 class LLMStream(llm.LLMStream):
-    _strip_brackets: bool = False  # fork(P2): default for streams built without __init__
+    _strip_brackets: bool = False  # fork(patch 08): default for streams built without __init__
 
     def __init__(
         self,
@@ -400,7 +400,7 @@ class LLMStream(llm.LLMStream):
         self._strict_tool_schema = strict_tool_schema
         self._client = client
         self._llm = llm_v
-        # fork(P2): read once per request, like the other options
+        # fork(patch 08): read once per request, like the other options
         self._strip_brackets = llm_v._opts.strip_brackets if isinstance(llm_v, LLM) else False
         self._extra_kwargs = drop_unsupported_params(model, extra_kwargs, tools=tools)
         self._tool_ctx = llm.ToolContext(tools)
@@ -435,7 +435,7 @@ class LLMStream(llm.LLMStream):
             if not self._tools:
                 # remove tool_choice from extra_kwargs if no tools are provided
                 self._extra_kwargs.pop("tool_choice", None)
-                # fork(P1): parallel_tool_calls without tools is rejected by some providers
+                # fork(patch 08): parallel_tool_calls without tools is rejected by some providers
                 # (e.g. Azure OpenAI)
                 self._extra_kwargs.pop("parallel_tool_calls", None)
 
@@ -531,7 +531,7 @@ class LLMStream(llm.LLMStream):
             delta.content, thinking_filter, final=choice.finish_reason is not None
         )
 
-        # fork(P2): strip bracket artifacts (e.g. citation markers like [1], [source])
+        # fork(patch 08): strip bracket artifacts (e.g. citation markers like [1], [source])
         if delta.content and self._strip_brackets:
             bracket_pos = delta.content.find("[")
             if bracket_pos != -1:

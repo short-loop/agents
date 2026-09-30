@@ -132,16 +132,16 @@ class EndpointingOptions(TypedDict, total=False):
     The higher the value, the more weight is given to the history.
     Defaults to ``0.9``. Only applies when mode is ``dynamic``."""
     sleep_floor: float | None
-    """fork(P6): minimum wait (s) after the last transcript before the turn is committed,
+    """fork(patch 03): minimum wait (s) after the last transcript before the turn is committed,
     regardless of how long the user has already been silent, so a late transcript never
     commits the turn instantly. Only applied when ``min_delay`` is at least this value.
     ``None`` (default) keeps upstream behaviour."""
     stale_anchor_raw_delay: bool
-    """fork(P6): when the delay anchored to the last speaking time has already elapsed
+    """fork(patch 03): when the delay anchored to the last speaking time has already elapsed
     (late transcript or stale VAD anchor), wait the raw endpointing delay instead of
     committing at once. Defaults to ``False`` (upstream behaviour)."""
     readout_rules: bool
-    """fork(P5): a transcript ending in 2+ number words waits ``max_delay`` and a trailing
+    """fork(patch 02): a transcript ending in 2+ number words waits ``max_delay`` and a trailing
     4-word alphanumeric/NATO sequence waits ``max_delay - 1``, both unanchored and ahead of
     the EOU model, so callers reading numbers are not cut off between groups. Defaults to
     ``True``."""
@@ -207,12 +207,12 @@ class InterruptionOptions(TypedDict, total=False):
     to ``(1.0, 1.0)``. The end value preserves transcripts received near the
     end of agent speech."""
     backchannel_words: set[str] | None
-    """fork(P4): a single-word transcript in this set ("okay", "mhm") while the agent
+    """fork(patch 01): a single-word transcript in this set ("okay", "mhm") while the agent
     speaks neither interrupts it nor commits a user turn. Words are compared
     lowercased with punctuation stripped. ``None`` uses the built-in default list.
     Applies in both interruption modes."""
     commit_words: set[str] | None
-    """fork(P4): a single-word transcript in this set while the agent speaks is recorded
+    """fork(patch 01): a single-word transcript in this set while the agent speaks is recorded
     as a user turn without interrupting. Takes precedence over ``backchannel_words``.
     ``None`` disables."""
 
@@ -317,7 +317,7 @@ class TurnHandlingOptions(TypedDict, total=False):
     user_turn_limit: UserTurnLimitOptions
     """User turn limit configuration. Use ``{"max_words": 50}`` to enable."""
     interruption_backoff: InterruptionBackoffOptions | None
-    """fork(P9, SL-3890): interruption-backoff modes. When the conversation shows a
+    """fork(patch 04, SL-3890): interruption-backoff modes. When the conversation shows a
     pattern of the agent being interrupted (assistant items committed with
     ``interrupted=True``), the session enters primed / transient / sustained modes that hold
     playout until enough user silence, lengthen endpointing for low-confidence turns and can

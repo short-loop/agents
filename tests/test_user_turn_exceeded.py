@@ -16,7 +16,7 @@ SESSION_TIMEOUT = 30
 
 @pytest.fixture(autouse=True)
 def _no_readout_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    # fork(P5): the fixtures below use number words as filler text, which would trigger the
+    # fork(patch 02): the fixtures below use number words as filler text, which would trigger the
     # digit read-out endpointing rule and delay every commit to max_delay
     from livekit.agents.voice import turn
 

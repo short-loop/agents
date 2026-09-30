@@ -603,7 +603,7 @@ def _pronunciation_dictionary_locators_payload(
     ]
 
 
-# fork(P12): faked preceding context steers ElevenLabs toward a softer delivery. Sent on
+# fork(patch 10): faked preceding context steers ElevenLabs toward a softer delivery. Sent on
 # the HTTP and websocket paths; text-to-dialogue (eleven_v3*) has no such field.
 _PREVIOUS_TEXT = "And she softly spoke : "
 
@@ -618,7 +618,7 @@ def _build_context_init_packet(opts: _TTSOptions, *, context_id: str) -> dict[st
         "text": " ",
         "voice_settings": voice_settings,
         "context_id": context_id,
-        "previous_text": _PREVIOUS_TEXT,  # fork(P12)
+        "previous_text": _PREVIOUS_TEXT,  # fork(patch 10)
     }
     if is_given(opts.chunk_length_schedule):
         init_pkt["generation_config"] = {
@@ -1243,7 +1243,7 @@ def _build_synthesize_body(
         "model_id": opts.model,
         "voice_settings": voice_settings,
         "apply_text_normalization": opts.apply_text_normalization,
-        "previous_text": _PREVIOUS_TEXT,  # fork(P12)
+        "previous_text": _PREVIOUS_TEXT,  # fork(patch 10)
     }
     if is_given(opts.language):
         body["language_code"] = opts.language.language

@@ -1,4 +1,4 @@
-"""fork: unit tests for the pure helpers behind P4 (crutch words) and P5 (digit endpointing)."""
+"""fork: unit tests for the pure helpers behind patch 01 (crutch words) and patch 02 (digit endpointing)."""
 
 from __future__ import annotations
 

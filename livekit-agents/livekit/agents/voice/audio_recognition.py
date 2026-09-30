@@ -53,9 +53,9 @@ from .turn import (
 if TYPE_CHECKING:
     from .agent_session import AgentSession
 
-MIN_LANGUAGE_DETECTION_LENGTH = 3  # fork(P7): upstream 5; short regional finals must update
+MIN_LANGUAGE_DETECTION_LENGTH = 3  # fork(patch 06): upstream 5; short regional finals must update
 
-# --- fork(P5): endpointing rules for digit / alphanumeric read-outs ---------------------
+# --- fork(patch 02): endpointing rules for digit / alphanumeric read-outs ---------------------
 
 _NUMBER_WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
 _NUMBER_WORDS_EXTENDED = _NUMBER_WORDS | {"ten"}
@@ -121,7 +121,7 @@ class _EndOfTurnMetrics:
     end_of_turn_delay: float | None
 
 
-# --- fork(P4): crutch-word guards while the agent speaks --------------------------------
+# --- fork(patch 01): crutch-word guards while the agent speaks --------------------------------
 
 _STRIP_PATTERN = re.compile(r"[\W_]+")
 
@@ -229,7 +229,7 @@ class RecognitionHooks(Protocol):
     def on_agent_backchannel_opportunity(self, ev: _AgentBackchannelOpportunityEvent) -> None: ...
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def on_user_turn_exceeded(self, ev: UserTurnExceededEvent) -> None: ...
-    def on_commit_word(self, transcript: str) -> None: ...  # fork(P4)
+    def on_commit_word(self, transcript: str) -> None: ...  # fork(patch 01)
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
 
 
@@ -315,7 +315,7 @@ class _STTPipeline:
 
 
 class AudioRecognition:
-    # fork(P6): class default so partially constructed instances (tests) still work
+    # fork(patch 03): class default so partially constructed instances (tests) still work
     _second_last_final_transcript_time: float | None = None
 
     def __init__(
@@ -358,7 +358,7 @@ class AudioRecognition:
         self._user_silence_ev.set()
 
         self._last_final_transcript_time: float | None = None
-        # fork(P6): the final before the last one, to detect a speaking anchor that the VAD
+        # fork(patch 03): the final before the last one, to detect a speaking anchor that the VAD
         # never refreshed between two finals
         self._second_last_final_transcript_time: float | None = None
         self._last_speaking_time: float | None = None
@@ -412,7 +412,7 @@ class AudioRecognition:
         self._backchannel_boundary_callback: Callable[[], None] | None = None
         # endregion
 
-        # fork(P4): crutch-word guards (None -> built-in default list / disabled)
+        # fork(patch 01): crutch-word guards (None -> built-in default list / disabled)
         _bc_words = session.options.interruption.get("backchannel_words")
         self._backchannel_words: set[str] = (
             {_strip_word(w) for w in _bc_words}
@@ -1213,18 +1213,18 @@ class AudioRecognition:
         return fut
 
     def is_backchannel_word(self, word: str) -> bool:
-        """fork(P4)"""
+        """fork(patch 01)"""
         return _strip_word(word) in self._backchannel_words
 
     def is_commit_word(self, word: str) -> bool:
-        """fork(P4)"""
+        """fork(patch 01)"""
         return bool(self._commit_words) and _strip_word(word) in self._commit_words
 
     def _check_stale_speaking_anchor(self) -> None:
-        """fork(P6, D9): warn when ``_last_speaking_time`` predates the previous final, i.e.
+        """fork(patch 03, D9): warn when ``_last_speaking_time`` predates the previous final, i.e.
         the VAD never refreshed the anchor between two finals. The 1.4.6 fork also forced the
         anchor to ``now`` and applied the raw endpointing delay; on 1.8 this is
-        detection-only until prod logs show the case still occurs (MIGRATION-1.8.md, D9)."""
+        detection-only until prod logs show the case still occurs (fork/MIGRATION-1.8.md, D9)."""
         if (
             self._last_speaking_time is not None
             and self._second_last_final_transcript_time is not None
@@ -1243,7 +1243,7 @@ class AudioRecognition:
 
     @property
     def get_last_user_language(self) -> LanguageCode | None:
-        """fork(P8): last language tag reported by the STT for this user."""
+        """fork(patch 06): last language tag reported by the STT for this user."""
         return self._last_language
 
     @property
@@ -1367,7 +1367,7 @@ class AudioRecognition:
 
             if use_stt_speaking_time:
                 self._last_speaking_time = stt_last_speaking_time
-            self._check_stale_speaking_anchor()  # fork(P6)
+            self._check_stale_speaking_anchor()  # fork(patch 03)
 
             # check user turn limit after accumulating transcript
             self._check_user_turn_limit(transcript)
@@ -1423,7 +1423,7 @@ class AudioRecognition:
 
             if use_stt_speaking_time:
                 self._last_speaking_time = stt_last_speaking_time
-            self._check_stale_speaking_anchor()  # fork(P6)
+            self._check_stale_speaking_anchor()  # fork(patch 03)
 
             if self._turn_detection_mode != "manual" or self._user_turn_committed:
                 confidence_vals = list(self._final_transcript_confidence) + [confidence]
@@ -1635,7 +1635,7 @@ class AudioRecognition:
             # stt enabled but no transcript yet
             return
 
-        # fork(P4): while the agent speaks, a lone commit word is recorded as a user turn
+        # fork(patch 01): while the agent speaks, a lone commit word is recorded as a user turn
         # without interrupting, and a lone backchannel word is neither an interruption
         # nor a turn (the transcript is dropped)
         if self._stt and self._agent_speaking and self._turn_detection_mode != "manual":
@@ -1693,14 +1693,14 @@ class AudioRecognition:
             unlikely_threshold: float | None = None
             backchannel_threshold: float | None = None
             from_cache = False
-            # fork(P5/P6): why this delay was chosen (one INFO line per decision, see below);
+            # fork(patch 02/03): why this delay was chosen (one INFO line per decision, see below);
             # raw delays ignore the speaking anchor on purpose
             delay_reason = "default"
             use_raw_delay = False
 
             readout_rules = self._endpointing.readout_rules is True
             if readout_rules and _ends_with_number_like(self._audio_transcript):
-                # fork(P5): callers reading numbers pause between groups
+                # fork(patch 02): callers reading numbers pause between groups
                 endpointing_delay = self._endpointing.max_delay
                 delay_reason = "ends_with_number"
                 use_raw_delay = True
@@ -1768,7 +1768,7 @@ class AudioRecognition:
                             and end_of_turn_probability < unlikely_threshold
                         ):
                             endpointing_delay = self._endpointing.max_delay
-                            delay_reason = "eou_unlikely"  # fork(P6)
+                            delay_reason = "eou_unlikely"  # fork(patch 03)
 
                         eou_span_attributes: dict[str, Any] = {
                             trace_types.ATTR_CHAT_CTX: json.dumps(
@@ -1873,7 +1873,7 @@ class AudioRecognition:
                                 prediction_event.detection_delay,
                             )
 
-            # fork(P9): interruption-backoff modes. Flat per-mode delays layered on top of
+            # fork(patch 04): interruption-backoff modes. Flat per-mode delays layered on top of
             # whatever endpointing object is active (fixed or dynamic); confident turns keep
             # the fast delay, uncertain ones (below max(model threshold, mode threshold)) or
             # turns without a prediction pay the mode backoff. Primed only raises the cap.
@@ -1913,7 +1913,7 @@ class AudioRecognition:
             if eou_wait_span.is_recording():  # the wait may have ended with resumed speech
                 eou_wait_span.set_attribute(trace_types.ATTR_EOU_DELAY, endpointing_delay)
 
-            # fork(P6): opt-in (EndpointingOptions.stale_anchor_raw_delay / sleep_floor):
+            # fork(patch 03): opt-in (EndpointingOptions.stale_anchor_raw_delay / sleep_floor):
             # an anchored delay that already elapsed may fall back to the raw delay, and
             # the sleep may be floored so a late transcript never commits the turn instantly
             if use_raw_delay or not last_speaking_time:

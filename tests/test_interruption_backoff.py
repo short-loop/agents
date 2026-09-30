@@ -1,4 +1,4 @@
-"""fork(P9, SL-3890): session-level tests for the interruption-backoff modes."""
+"""fork(patch 04, SL-3890): session-level tests for the interruption-backoff modes."""
 
 from __future__ import annotations
 

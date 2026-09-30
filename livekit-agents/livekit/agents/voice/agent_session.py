@@ -330,7 +330,7 @@ class AgentSessionOptions:
 
     @property
     def interruption_backoff(self) -> InterruptionBackoffOptions | None:
-        """fork(P9)"""
+        """fork(patch 04)"""
         return self.turn_handling.get("interruption_backoff")
 
 
@@ -403,7 +403,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         tts: NotGivenOr[tts.TTS | TTSModels | str] = NOT_GIVEN,
         turn_handling: NotGivenOr[TurnHandlingOptions] = NOT_GIVEN,
         stt_context_options: NotGivenOr[STTContextOptions] = NOT_GIVEN,
-        # fork(P9): alias of turn_handling["interruption_backoff"] (the kwarg wins)
+        # fork(patch 04): alias of turn_handling["interruption_backoff"] (the kwarg wins)
         interruption_backoff: NotGivenOr[InterruptionBackoffOptions | None] = NOT_GIVEN,
         # Tool settings
         tools: NotGivenOr[list[llm.Tool | llm.Toolset]] = NOT_GIVEN,
@@ -584,7 +584,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
         else:
             stt_context = None
         user_turn_limit = _resolve_user_turn_limit(turn_handling.get("user_turn_limit"))
-        interruption_backoff_opts = (  # fork(P9)
+        interruption_backoff_opts = (  # fork(patch 04)
             interruption_backoff
             if is_given(interruption_backoff)
             else turn_handling.get("interruption_backoff")
@@ -710,7 +710,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
         self._agent: Agent | None = None
         self._activity: AgentActivity | None = None
-        # fork(P9): per-session (survives agent handoffs) interruption pattern tracking
+        # fork(patch 04): per-session (survives agent handoffs) interruption pattern tracking
         self._interruption_tracker = InterruptionTracker(self._opts.interruption_backoff)
         self._next_activity: AgentActivity | None = None
         self._user_state: UserState = "listening"
@@ -852,7 +852,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
 
     @property
     def get_last_user_language(self) -> LanguageCode | None:
-        """fork(P8): the last language the STT detected for the user, or None before the
+        """fork(patch 06): the last language the STT detected for the user, or None before the
         first tagged transcript. Used by apps to switch TTS voice / prompt language."""
         if self._activity is None:
             return None
@@ -2320,7 +2320,7 @@ class AgentSession(rtc.EventEmitter[EventTypes], Generic[Userdata_T]):
     def _conversation_item_added(self, message: llm.ChatMessage) -> None:
         self._chat_ctx.insert(message)
 
-        # fork(P9): an interruption is an assistant item committed interrupted with spoken
+        # fork(patch 04): an interruption is an assistant item committed interrupted with spoken
         # text; mode transitions are evaluated at user-turn commits
         if self._interruption_tracker.enabled and (message.text_content or "").strip():
             if message.role == "assistant" and message.interrupted:

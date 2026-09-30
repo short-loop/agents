@@ -51,7 +51,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
         )
         self._room = room
         self._track_name = track_name
-        self._max_volume = max_volume  # fork(P11)
+        self._max_volume = max_volume  # fork(patch 09)
         self._lock = asyncio.Lock()
         self._audio_source = rtc.AudioSource(sample_rate, num_channels, queue_size_ms=200)
         self._publish_options = track_publish_options
@@ -279,7 +279,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
         self.on_playback_finished(playback_position=pushed_duration, interrupted=interrupted)
 
     def _scale_volume(self, frame: rtc.AudioFrame) -> rtc.AudioFrame:
-        """fork(P11): attenuate playout to ``max_volume`` (no-op at 1.0)."""
+        """fork(patch 09): attenuate playout to ``max_volume`` (no-op at 1.0)."""
         if self._max_volume >= 1.0:
             return frame
         import numpy as np
@@ -330,7 +330,7 @@ class _ParticipantAudioOutput(io.AudioOutput):
                     self._report_run(offset=self._source_pushed_duration, ended_at=self._dry_at)
 
                 self._source_pushed_duration += frame.duration
-                frame = self._scale_volume(frame)  # fork(P11)
+                frame = self._scale_volume(frame)  # fork(patch 09)
                 await self._audio_source.capture_frame(frame)
                 self._dry_at = time.time() + self._audio_source.queued_duration
             finally:
