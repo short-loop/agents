@@ -12,6 +12,10 @@ class BaseEndpointing:
         self._min_delay = min_delay
         self._max_delay = max_delay
         self._overlapping = False
+        # fork(patch 03): see EndpointingOptions.sleep_floor / stale_anchor_raw_delay
+        self.sleep_floor: float | None = None
+        self.stale_anchor_raw_delay: bool = False
+        self.readout_rules: bool = True  # fork(patch 02)
 
     def update_options(
         self, *, min_delay: NotGivenOr[float] = NOT_GIVEN, max_delay: NotGivenOr[float] = NOT_GIVEN
@@ -269,15 +273,21 @@ class DynamicEndpointing(BaseEndpointing):
 
 
 def create_endpointing(options: EndpointingOptions) -> BaseEndpointing:
+    endpointing: BaseEndpointing
     match options.get("mode", "fixed"):
         case "dynamic":
-            return DynamicEndpointing(
+            endpointing = DynamicEndpointing(
                 min_delay=options["min_delay"],
                 max_delay=options["max_delay"],
                 alpha=options["alpha"],
             )
         case _:
-            return BaseEndpointing(
+            endpointing = BaseEndpointing(
                 min_delay=options["min_delay"],
                 max_delay=options["max_delay"],
             )
+    # fork(patch 03)
+    endpointing.sleep_floor = options.get("sleep_floor")
+    endpointing.stale_anchor_raw_delay = options.get("stale_anchor_raw_delay", False)
+    endpointing.readout_rules = options.get("readout_rules", True)
+    return endpointing

@@ -14,6 +14,15 @@ pytestmark = [pytest.mark.unit, pytest.mark.virtual_time, pytest.mark.no_concurr
 SESSION_TIMEOUT = 30
 
 
+@pytest.fixture(autouse=True)
+def _no_readout_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    # fork(patch 02): the fixtures below use number words as filler text, which would trigger the
+    # digit read-out endpointing rule and delay every commit to max_delay
+    from livekit.agents.voice import turn
+
+    monkeypatch.setitem(turn._ENDPOINTING_DEFAULTS, "readout_rules", False)
+
+
 class _CapturingAgent(Agent):
     """Test agent that captures on_user_turn_exceeded events instead of responding."""
 

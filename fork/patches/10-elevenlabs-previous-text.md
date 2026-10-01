@@ -1,0 +1,65 @@
+# Patch 10 — ElevenLabs `previous_text` priming
+
+| | |
+|---|---|
+| **Status** | Always-on for the ElevenLabs TTS plugin (not configurable) |
+| **Origin** | 1.4.6: fork commit `d7081f0` (short-loop/agents#56). 1.8.3: `3c69f69e2` (P12); kept as a literal per decision D5 |
+| **Depends on** | — |
+| **Automated tests** | None |
+| **Code markers** | `fork(patch 10)` |
+
+## Why
+
+ElevenLabs uses `previous_text` as context that conditions prosody without being spoken.
+Priming every request with a fixed soft-spoken narrative prefix makes the voice delivery
+calmer and more consistent across short, independent utterances on calls.
+
+## Behaviour
+
+The fixed string **"And she softly spoke : "** is sent as `previous_text` on:
+
+1. the HTTP (non-streaming) synthesis body built by `_build_synthesize_body`, next to
+   `text`, `model_id` and `voice_settings`;
+2. the WebSocket context-initialisation packet built by `_build_context_init_packet` (the
+   packet with `"text": " "`, `voice_settings` and `context_id`, sent when a new context
+   starts).
+
+Not sent on the text-to-dialogue path (`_build_dialogue_context_init_packet`, used for
+`eleven_v3*` models), which has no such field. Every other ElevenLabs synthesis through
+this fork carries the prefix, regardless of voice or language.
+
+## Implementation walkthrough
+
+`livekit-plugins/livekit-plugins-elevenlabs/livekit/plugins/elevenlabs/tts.py`: module
+constant `_PREVIOUS_TEXT` and one dictionary key added in each of the two builder helpers.
+
+## Re-applying the patch
+
+Add the same `previous_text` value to every request payload that starts a synthesis
+(HTTP body and WebSocket context init). If upstream adds a new synthesis path (e.g. a new
+endpoint), add it there too.
+
+## Upstream contracts relied upon
+
+The ElevenLabs API accepting `previous_text` on both endpoints.
+
+## Conflict guidance
+
+If upstream adds its own `previous_text` / `next_text` option to the plugin, **do not end
+up sending the key twice or overriding a user-provided value unknowingly**: prefer the
+upstream option and set the fork default through it (escalate for a decision).
+
+## Verification after sync
+
+Both payloads still include `previous_text` with the exact string (including the space
+before the colon and the trailing space).
+
+## Known caveats
+
+- The prefix is English and gendered ("she"); it is applied even for non-English or
+  male voices.
+- With multilingual output this may influence pronunciation of the first words.
+
+## Drop criteria
+
+Product decision to stop priming, or migration to an upstream plugin option that sets it.

@@ -32,6 +32,11 @@ from .events import (
     UserTranscriptionTimeoutEvent,
     UserTurnExceededEvent,
 )
+from .interruption_tracker import (
+    InterruptionBackoffOptions,
+    InterruptionMode,
+    InterruptionModeSettings,
+)
 from .keyterm_detection import (
     KeytermDetectionOptions,
     KeytermsOptions,
@@ -52,6 +57,9 @@ __all__ = [
     "ExpressiveOptions",
     "NonverbalOptions",
     "RecordingOptions",
+    "InterruptionBackoffOptions",
+    "InterruptionMode",
+    "InterruptionModeSettings",
     "SpeechSteeringOptions",
     "RunOutputOptions",
     "VoiceActivityVideoSampler",

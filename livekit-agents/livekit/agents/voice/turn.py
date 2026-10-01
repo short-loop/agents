@@ -17,6 +17,7 @@ from ..types import (
     NotGivenOr,
 )
 from ..utils import is_given
+from .interruption_tracker import InterruptionBackoffOptions
 
 
 @dataclass
@@ -130,6 +131,20 @@ class EndpointingOptions(TypedDict, total=False):
     """Exponential moving average coefficient for dynamic endpointing.
     The higher the value, the more weight is given to the history.
     Defaults to ``0.9``. Only applies when mode is ``dynamic``."""
+    sleep_floor: float | None
+    """fork(patch 03): minimum wait (s) after the last transcript before the turn is committed,
+    regardless of how long the user has already been silent, so a late transcript never
+    commits the turn instantly. Only applied when ``min_delay`` is at least this value.
+    ``None`` (default) keeps upstream behaviour."""
+    stale_anchor_raw_delay: bool
+    """fork(patch 03): when the delay anchored to the last speaking time has already elapsed
+    (late transcript or stale VAD anchor), wait the raw endpointing delay instead of
+    committing at once. Defaults to ``False`` (upstream behaviour)."""
+    readout_rules: bool
+    """fork(patch 02): a transcript ending in 2+ number words waits ``max_delay`` and a trailing
+    4-word alphanumeric/NATO sequence waits ``max_delay - 1``, both unanchored and ahead of
+    the EOU model, so callers reading numbers are not cut off between groups. Defaults to
+    ``True``."""
 
 
 _ENDPOINTING_DEFAULTS: EndpointingOptions = {
@@ -137,6 +152,9 @@ _ENDPOINTING_DEFAULTS: EndpointingOptions = {
     "min_delay": 0.5,
     "max_delay": 3.0,
     "alpha": 0.9,
+    "sleep_floor": None,
+    "stale_anchor_raw_delay": False,
+    "readout_rules": True,
 }
 
 _STREAMING_ENDPOINTING_DEFAULTS: EndpointingOptions = {
@@ -144,6 +162,9 @@ _STREAMING_ENDPOINTING_DEFAULTS: EndpointingOptions = {
     "min_delay": 0.3,
     "max_delay": 2.5,
     "alpha": 0.9,
+    "sleep_floor": None,
+    "stale_anchor_raw_delay": False,
+    "readout_rules": True,
 }
 
 
@@ -185,6 +206,15 @@ class InterruptionOptions(TypedDict, total=False):
     different values for start and end separately. ``None`` disables. Defaults
     to ``(1.0, 1.0)``. The end value preserves transcripts received near the
     end of agent speech."""
+    backchannel_words: set[str] | None
+    """fork(patch 01): a single-word transcript in this set ("okay", "mhm") while the agent
+    speaks neither interrupts it nor commits a user turn. Words are compared
+    lowercased with punctuation stripped. ``None`` uses the built-in default list.
+    Applies in both interruption modes."""
+    commit_words: set[str] | None
+    """fork(patch 01): a single-word transcript in this set while the agent speaks is recorded
+    as a user turn without interrupting. Takes precedence over ``backchannel_words``.
+    ``None`` disables."""
 
 
 _INTERRUPTION_DEFAULTS: InterruptionOptions = {
@@ -195,6 +225,8 @@ _INTERRUPTION_DEFAULTS: InterruptionOptions = {
     "resume_false_interruption": True,
     "false_interruption_timeout": 2.0,
     "backchannel_boundary": (1.0, 1.0),
+    "backchannel_words": None,
+    "commit_words": None,
 }
 
 
@@ -284,6 +316,13 @@ class TurnHandlingOptions(TypedDict, total=False):
     """Preemptive generation configuration. Use ``{"enabled": False}`` to disable."""
     user_turn_limit: UserTurnLimitOptions
     """User turn limit configuration. Use ``{"max_words": 50}`` to enable."""
+    interruption_backoff: InterruptionBackoffOptions | None
+    """fork(patch 04, SL-3890): interruption-backoff modes. When the conversation shows a
+    pattern of the agent being interrupted (assistant items committed with
+    ``interrupted=True``), the session enters primed / transient / sustained modes that hold
+    playout until enough user silence, lengthen endpointing for low-confidence turns and can
+    disable preemptive generation. ``None`` (default) disables the feature. Independent of
+    the ``endpointing`` mode: it only reads the active endpointing object's delays."""
 
 
 def _resolve_preemptive_generation(

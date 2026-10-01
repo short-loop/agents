@@ -220,6 +220,10 @@ class _LLMOptions:
     api_secret: str
     inference_class: InferenceClass | None
     extra_kwargs: ChatCompletionOptions | dict[str, Any]
+    strip_brackets: bool
+    """fork(patch 08): truncate streamed text at the first ``[`` so citation-style markers
+    (``[1]``, ``[source]``) are never spoken. AgentActivity turns this off for expressive
+    turns, whose TTS markup is bracketed."""
 
 
 class LLM(llm.LLM):
@@ -233,6 +237,7 @@ class LLM(llm.LLM):
         api_secret: str | None = None,
         inference_class: InferenceClass | None = None,
         extra_kwargs: ChatCompletionOptions | dict[str, Any] | None = None,
+        strip_brackets: bool = True,
     ) -> None:
         super().__init__()
 
@@ -248,6 +253,7 @@ class LLM(llm.LLM):
             api_secret=lk_api_secret,
             inference_class=inference_class,
             extra_kwargs=extra_kwargs or {},
+            strip_brackets=strip_brackets,
         )
         self._client = openai.AsyncClient(
             api_key=create_access_token(self._opts.api_key, self._opts.api_secret),
@@ -279,6 +285,7 @@ class LLM(llm.LLM):
         *,
         model: NotGivenOr[LLMModels | str] = NOT_GIVEN,
         extra_kwargs: NotGivenOr[ChatCompletionOptions | dict[str, Any]] = NOT_GIVEN,
+        strip_brackets: NotGivenOr[bool] = NOT_GIVEN,
     ) -> None:
         """Update LLM configuration options.
 
@@ -291,6 +298,8 @@ class LLM(llm.LLM):
             self._opts.model = model
         if is_given(extra_kwargs):
             self._opts.extra_kwargs = dict(extra_kwargs)
+        if is_given(strip_brackets):
+            self._opts.strip_brackets = strip_brackets
 
     @property
     def model(self) -> str:
@@ -366,6 +375,8 @@ class LLM(llm.LLM):
 
 
 class LLMStream(llm.LLMStream):
+    _strip_brackets: bool = False  # fork(patch 08): default for streams built without __init__
+
     def __init__(
         self,
         llm_v: LLM | llm.LLM,
@@ -389,6 +400,8 @@ class LLMStream(llm.LLMStream):
         self._strict_tool_schema = strict_tool_schema
         self._client = client
         self._llm = llm_v
+        # fork(patch 08): read once per request, like the other options
+        self._strip_brackets = llm_v._opts.strip_brackets if isinstance(llm_v, LLM) else False
         self._extra_kwargs = drop_unsupported_params(model, extra_kwargs, tools=tools)
         self._tool_ctx = llm.ToolContext(tools)
 
@@ -422,6 +435,9 @@ class LLMStream(llm.LLMStream):
             if not self._tools:
                 # remove tool_choice from extra_kwargs if no tools are provided
                 self._extra_kwargs.pop("tool_choice", None)
+                # fork(patch 08): parallel_tool_calls without tools is rejected by some providers
+                # (e.g. Azure OpenAI)
+                self._extra_kwargs.pop("parallel_tool_calls", None)
 
             extra_headers = self._extra_kwargs.setdefault("extra_headers", {})
             extra_headers.update(get_inference_headers(inference_class=self._inference_class))
@@ -514,6 +530,12 @@ class LLMStream(llm.LLMStream):
         delta.content = llm_utils.strip_thinking_tokens(
             delta.content, thinking_filter, final=choice.finish_reason is not None
         )
+
+        # fork(patch 08): strip bracket artifacts (e.g. citation markers like [1], [source])
+        if delta.content and self._strip_brackets:
+            bracket_pos = delta.content.find("[")
+            if bracket_pos != -1:
+                delta.content = delta.content[:bracket_pos]
 
         if delta.tool_calls:
             for tool in delta.tool_calls:

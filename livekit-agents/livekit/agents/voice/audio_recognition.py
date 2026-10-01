@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import math
+import re
 import time
 from collections import deque
 from collections.abc import AsyncIterable, Callable, Iterator
@@ -40,6 +41,7 @@ from .events import (
     UserTurnExceededEvent,
     _AgentBackchannelOpportunityEvent,
 )
+from .interruption_tracker import InterruptionMode, InterruptionTracker
 from .turn import (
     TurnDetectionEvent,
     TurnDetectionMode as TurnDetectionMode,
@@ -51,7 +53,59 @@ from .turn import (
 if TYPE_CHECKING:
     from .agent_session import AgentSession
 
-MIN_LANGUAGE_DETECTION_LENGTH = 5
+MIN_LANGUAGE_DETECTION_LENGTH = 3  # fork(patch 06): upstream 5; short regional finals must update
+
+# --- fork(patch 02): endpointing rules for digit / alphanumeric read-outs ---------------------
+
+_NUMBER_WORDS = {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
+_NUMBER_WORDS_EXTENDED = _NUMBER_WORDS | {"ten"}
+_MILITARY_LETTERS = {
+    "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+    "juliett", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+    "sierra", "tango", "uniform", "victor", "whiskey", "yankee", "zulu",
+}  # fmt: skip
+
+
+def _ends_with_number_like(transcript: str) -> bool:
+    """True if the transcript ends with 2+ consecutive number words (a digit read-out)."""
+    try:
+        words = transcript.rstrip(".,!?").lower().split()
+        count = 0
+        for word in reversed(words):
+            if word.isdigit() or word in _NUMBER_WORDS:
+                count += 1
+                if count >= 2:
+                    return True
+            else:
+                break
+        return False
+    except Exception:
+        logger.exception("Error in _ends_with_number_like")
+        return False
+
+
+def _ends_with_alpha_numeric(transcript: str) -> bool:
+    """True if the last four words form an alphanumeric sequence with at least one number."""
+    try:
+        words = transcript.rstrip(".,!?").lower().split()
+        if len(words) < 4:
+            return False
+        last_four = words[-4:]
+
+        def is_num(w: str) -> bool:
+            return w.isdigit() or w in _NUMBER_WORDS_EXTENDED
+
+        def is_char(w: str) -> bool:
+            return (len(w) == 1 and w.isalpha()) or w in _MILITARY_LETTERS
+
+        if not all(is_num(w) or is_char(w) for w in last_four):
+            return False
+        return any(is_num(w) for w in last_four)
+    except Exception:
+        logger.exception("Error in _ends_with_alpha_numeric")
+        return False
+
+
 _NON_SPECIFIC_LANGUAGE_CODES = frozenset({"auto", "multi"})
 # Mirrors turn_detector.base.MAX_HISTORY_TURNS for tracing
 _EOU_MAX_HISTORY_TURNS = 6
@@ -65,6 +119,24 @@ class _EndOfTurnMetrics:
     stopped_speaking_at: float | None
     transcription_delay: float | None
     end_of_turn_delay: float | None
+
+
+# --- fork(patch 01): crutch-word guards while the agent speaks --------------------------------
+
+_STRIP_PATTERN = re.compile(r"[\W_]+")
+
+
+def _strip_word(word: str) -> str:
+    return _STRIP_PATTERN.sub("", word.lower().strip())
+
+
+DEFAULT_BACKCHANNEL_WORDS: set[str] = {
+    "", "uh", "um", "ugh", "uhh", "oof", "aye", "hi", "hello", "okay", "ok", "yes", "yeah",
+    "ya", "sure", "yep", "yup", "hm", "hmm", "hmmm", "hmmmm", "mm", "mhm", "mmhmm", "mhmm",
+    "mhmmm", "mmhmmm", "mmmhmm", "uhuh", "uhhuh", "huh", "eh", "ah", "aah", "aaah",
+}  # fmt: skip
+
+_STRIPPED_BACKCHANNEL_WORDS: set[str] = {_strip_word(w) for w in DEFAULT_BACKCHANNEL_WORDS}
 
 
 @dataclass
@@ -157,6 +229,7 @@ class RecognitionHooks(Protocol):
     def on_agent_backchannel_opportunity(self, ev: _AgentBackchannelOpportunityEvent) -> None: ...
     def on_preemptive_generation(self, info: _PreemptiveGenerationInfo) -> None: ...
     def on_user_turn_exceeded(self, ev: UserTurnExceededEvent) -> None: ...
+    def on_commit_word(self, transcript: str) -> None: ...  # fork(patch 01)
     def retrieve_chat_ctx(self) -> llm.ChatContext: ...
 
 
@@ -242,6 +315,9 @@ class _STTPipeline:
 
 
 class AudioRecognition:
+    # fork(patch 03): class default so partially constructed instances (tests) still work
+    _second_last_final_transcript_time: float | None = None
+
     def __init__(
         self,
         session: AgentSession,
@@ -282,6 +358,9 @@ class AudioRecognition:
         self._user_silence_ev.set()
 
         self._last_final_transcript_time: float | None = None
+        # fork(patch 03): the final before the last one, to detect a speaking anchor that the VAD
+        # never refreshed between two finals
+        self._second_last_final_transcript_time: float | None = None
         self._last_speaking_time: float | None = None
         self._speech_start_time: float | None = None
 
@@ -332,6 +411,18 @@ class AudioRecognition:
         self._backchannel_boundary_timer: asyncio.TimerHandle | None = None
         self._backchannel_boundary_callback: Callable[[], None] | None = None
         # endregion
+
+        # fork(patch 01): crutch-word guards (None -> built-in default list / disabled)
+        _bc_words = session.options.interruption.get("backchannel_words")
+        self._backchannel_words: set[str] = (
+            {_strip_word(w) for w in _bc_words}
+            if _bc_words is not None
+            else _STRIPPED_BACKCHANNEL_WORDS
+        )
+        _commit_words = session.options.interruption.get("commit_words")
+        self._commit_words: set[str] = (
+            {_strip_word(w) for w in _commit_words} if _commit_words else set()
+        )
 
         self._user_turn_span: trace.Span | None = None
         self._user_turn_start: float | None = None
@@ -1122,6 +1213,40 @@ class AudioRecognition:
         self._commit_user_turn_atask.add_done_callback(_on_task_done)
         return fut
 
+    def is_backchannel_word(self, word: str) -> bool:
+        """fork(patch 01)"""
+        return _strip_word(word) in self._backchannel_words
+
+    def is_commit_word(self, word: str) -> bool:
+        """fork(patch 01)"""
+        return bool(self._commit_words) and _strip_word(word) in self._commit_words
+
+    def _check_stale_speaking_anchor(self) -> None:
+        """fork(patch 03, D9): warn when ``_last_speaking_time`` predates the previous final, i.e.
+        the VAD never refreshed the anchor between two finals. The 1.4.6 fork also forced the
+        anchor to ``now`` and applied the raw endpointing delay; on 1.8 this is
+        detection-only until prod logs show the case still occurs (fork/MIGRATION-1.8.md, D9)."""
+        if (
+            self._last_speaking_time is not None
+            and self._second_last_final_transcript_time is not None
+            and self._last_speaking_time < self._second_last_final_transcript_time
+        ):
+            logger.warning(
+                "stale last_speaking_time detected",
+                extra={
+                    "last_speaking_time": self._last_speaking_time,
+                    "second_last_final_transcript_time": self._second_last_final_transcript_time,
+                    "lag": round(
+                        self._second_last_final_transcript_time - self._last_speaking_time, 3
+                    ),
+                },
+            )
+
+    @property
+    def get_last_user_language(self) -> LanguageCode | None:
+        """fork(patch 06): last language tag reported by the STT for this user."""
+        return self._last_language
+
     @property
     def _current_transcript(self) -> str:
         """
@@ -1245,6 +1370,7 @@ class AudioRecognition:
                 extra["transcript_delay"] = time.time() - self._last_speaking_time
             logger.debug("received user transcript", extra=extra)
 
+            self._second_last_final_transcript_time = self._last_final_transcript_time
             self._last_final_transcript_time = time.time()
             self._audio_transcript += f" {transcript}"
             self._audio_transcript = self._audio_transcript.lstrip()
@@ -1255,6 +1381,7 @@ class AudioRecognition:
 
             if use_stt_speaking_time:
                 self._last_speaking_time = stt_last_speaking_time
+            self._check_stale_speaking_anchor()  # fork(patch 03)
 
             # check user turn limit after accumulating transcript
             self._check_user_turn_limit(transcript)
@@ -1310,6 +1437,7 @@ class AudioRecognition:
 
             if use_stt_speaking_time:
                 self._last_speaking_time = stt_last_speaking_time
+            self._check_stale_speaking_anchor()  # fork(patch 03)
 
             if self._turn_detection_mode != "manual" or self._user_turn_committed:
                 confidence_vals = list(self._final_transcript_confidence) + [confidence]
@@ -1521,6 +1649,25 @@ class AudioRecognition:
             # stt enabled but no transcript yet
             return
 
+        # fork(patch 01): while the agent speaks, a lone commit word is recorded as a user turn
+        # without interrupting, and a lone backchannel word is neither an interruption
+        # nor a turn (the transcript is dropped)
+        if self._stt and self._agent_speaking and self._turn_detection_mode != "manual":
+            words = self._current_transcript.strip().split()
+            if len(words) == 1:
+                word = words[0]
+                if self.is_commit_word(word):
+                    logger.debug(
+                        "commit word detected, adding to context", extra={"lk.pii.word": word}
+                    )
+                    self._hooks.on_commit_word(self._audio_transcript)
+                    self._audio_transcript = ""
+                    return
+                if self.is_backchannel_word(word):
+                    logger.debug("backchannel word detected, ignoring", extra={"lk.pii.word": word})
+                    self._audio_transcript = ""
+                    return
+
         chat_ctx = chat_ctx.copy()
         if self._audio_transcript:
             chat_ctx.add_message(role="user", content=self._audio_transcript)
@@ -1559,8 +1706,23 @@ class AudioRecognition:
             end_of_turn_probability: float | None = None
             unlikely_threshold: float | None = None
             backchannel_threshold: float | None = None
+            from_cache = False
+            # fork(patch 02/03): why this delay was chosen (one INFO line per decision, see below);
+            # raw delays ignore the speaking anchor on purpose
+            delay_reason = "default"
+            use_raw_delay = False
 
-            if turn_detector is not None:
+            readout_rules = self._endpointing.readout_rules is True
+            if readout_rules and _ends_with_number_like(self._audio_transcript):
+                # fork(patch 02): callers reading numbers pause between groups
+                endpointing_delay = self._endpointing.max_delay
+                delay_reason = "ends_with_number"
+                use_raw_delay = True
+            elif readout_rules and _ends_with_alpha_numeric(self._audio_transcript):
+                endpointing_delay = max(self._endpointing.max_delay - 1.0, endpointing_delay)
+                delay_reason = "ends_with_alphanumeric"
+                use_raw_delay = True
+            elif turn_detector is not None:
                 if not await turn_detector.supports_language(self._last_language):
                     logger.info("Turn detector does not support language %s", self._last_language)
                 else:
@@ -1620,6 +1782,7 @@ class AudioRecognition:
                             and end_of_turn_probability < unlikely_threshold
                         ):
                             endpointing_delay = self._endpointing.max_delay
+                            delay_reason = "eou_unlikely"  # fork(patch 03)
 
                         eou_span_attributes: dict[str, Any] = {
                             trace_types.ATTR_CHAT_CTX: json.dumps(
@@ -1724,12 +1887,83 @@ class AudioRecognition:
                                 prediction_event.detection_delay,
                             )
 
+            # fork(patch 04): interruption-backoff modes. Flat per-mode delays layered on top of
+            # whatever endpointing object is active (fixed or dynamic); confident turns keep
+            # the fast delay, uncertain ones (below max(model threshold, mode threshold)) or
+            # turns without a prediction pay the mode backoff. Primed only raises the cap.
+            tracker = getattr(self._session, "_interruption_tracker", None)
+            interruption_mode = InterruptionMode.NORMAL
+            if isinstance(tracker, InterruptionTracker) and tracker.enabled:
+                interruption_mode = tracker.mode
+                mode_name = interruption_mode.value
+                backoff_params = tracker.backoff_params()
+                if use_raw_delay:
+                    if backoff_params is not None and backoff_params[1] > endpointing_delay:
+                        endpointing_delay = backoff_params[1]
+                        delay_reason = f"{delay_reason}+{mode_name}_backoff"
+                elif backoff_params is not None:
+                    mode_threshold, mode_backoff = backoff_params
+                    if end_of_turn_probability is None:
+                        # no turn detector, unsupported language, failed or timed-out prediction
+                        endpointing_delay = mode_backoff
+                        delay_reason = f"{mode_name}_backoff_no_eou"
+                    else:
+                        effective_threshold = (
+                            mode_threshold
+                            if unlikely_threshold is None
+                            else max(unlikely_threshold, mode_threshold)
+                        )
+                        if end_of_turn_probability < effective_threshold:
+                            endpointing_delay = mode_backoff
+                            delay_reason = f"{mode_name}_backoff"
+                elif (
+                    interruption_mode is InterruptionMode.PRIMED
+                    and delay_reason == "eou_unlikely"
+                    and (primed_cap := tracker.primed_max_endpointing()) is not None
+                ):
+                    endpointing_delay = primed_cap
+                    delay_reason = "primed_backoff"
+
             if eou_wait_span.is_recording():  # the wait may have ended with resumed speech
                 eou_wait_span.set_attribute(trace_types.ATTR_EOU_DELAY, endpointing_delay)
 
-            extra_sleep = endpointing_delay
-            if last_speaking_time:
-                extra_sleep += last_speaking_time - time.time()
+            # fork(patch 03): opt-in (EndpointingOptions.stale_anchor_raw_delay / sleep_floor):
+            # an anchored delay that already elapsed may fall back to the raw delay, and
+            # the sleep may be floored so a late transcript never commits the turn instantly
+            if use_raw_delay or not last_speaking_time:
+                extra_sleep = endpointing_delay
+            elif (
+                self._endpointing.stale_anchor_raw_delay is True
+                and last_speaking_time + endpointing_delay - time.time() < 0
+            ):
+                logger.debug(
+                    "last_speaking_time appears stale, defaulting to raw endpointing delay"
+                )
+                extra_sleep = endpointing_delay
+            else:
+                extra_sleep = last_speaking_time + endpointing_delay - time.time()
+            # explicit type checks: tests may stub the endpointing object with a MagicMock
+            sleep_floor = self._endpointing.sleep_floor
+            if (
+                isinstance(sleep_floor, (int, float))
+                and self._endpointing.min_delay >= sleep_floor > extra_sleep
+            ):
+                extra_sleep = float(sleep_floor)
+            logger.info(
+                "eou sleep",
+                extra={
+                    "delay": round(extra_sleep, 3),
+                    "reason": delay_reason,
+                    "endpointing_delay": round(endpointing_delay, 3),
+                    "last_speaking_time": last_speaking_time,
+                    "use_raw_delay": use_raw_delay,
+                    "trigger": trigger,
+                    "from_cache": from_cache,
+                    "end_of_turn_probability": end_of_turn_probability,
+                    "unlikely_threshold": unlikely_threshold,
+                    "interruption_mode": interruption_mode.value,
+                },
+            )
             delay_completed = False
             if extra_sleep > 0:
                 try:
