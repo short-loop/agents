@@ -191,6 +191,12 @@ class InterruptionTracker:
             return None
         return settings.silence_gate
 
+    def primed_max_endpointing(self) -> float | None:
+        """Returns the endpointing cap for EOU-unlikely turns while primed, or ``None``."""
+        if self._opts is None or self._mode is not InterruptionMode.PRIMED:
+            return None
+        return self._opts.primed_max_endpointing
+
     def preemptive_disabled(self) -> bool:
         if self._opts is not None and self._mode is InterruptionMode.NORMAL:
             return self._opts.normal_disable_preemptive

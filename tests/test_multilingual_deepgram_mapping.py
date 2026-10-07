@@ -4,6 +4,8 @@ import pytest
 
 from livekit.agents.utils import is_given
 
+pytestmark = pytest.mark.unit
+
 pytest.importorskip("livekit.plugins.deepgram")
 
 from livekit.plugins.deepgram.stt import live_transcription_to_speech_data  # noqa: E402
@@ -24,7 +26,7 @@ def _payload(*, languages: list[str] | None, word_languages: list[str] | None) -
     return {"channel": {"alternatives": [alt]}}
 
 
-def test_multi_mode_surfaces_detected_languages() -> None:
+def test_multi_mode_surfaces_source_languages() -> None:
     data = _payload(languages=["hi", "en"], word_languages=["hi", "en"])
     speech_data = live_transcription_to_speech_data(
         "multi", data, is_final=True, start_time_offset=0.0
@@ -32,7 +34,7 @@ def test_multi_mode_surfaces_detected_languages() -> None:
 
     sd = speech_data[0]
     assert sd.language == "hi"
-    assert sd.detected_languages == ["hi", "en"]
+    assert sd.source_languages == ["hi", "en"]
     assert sd.words is not None
     assert [w.language for w in sd.words] == ["hi", "en"]
 
@@ -45,7 +47,7 @@ def test_pinned_language_unaffected() -> None:
 
     sd = speech_data[0]
     assert sd.language == "en-US"
-    assert sd.detected_languages is None
+    assert sd.source_languages is None
     assert sd.words is not None
     assert all(not is_given(w.language) for w in sd.words)
 
@@ -59,4 +61,4 @@ def test_multi_mode_without_languages_key() -> None:
 
     sd = speech_data[0]
     assert sd.language == "multi"
-    assert sd.detected_languages is None
+    assert sd.source_languages is None

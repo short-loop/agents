@@ -3,9 +3,10 @@
 | | |
 |---|---|
 | **Status** | Opt-in (new class; nothing uses it unless the app constructs it) |
-| **Origin** | Fork commits `d7081f0` (short-loop/agents#56, "fix: handle parallel tools calls") and `104ed89` (short-loop/agents#58, "llm hedging and observability", "winner id race") |
+| **Origin** | 1.4.6: fork commits `d7081f0` (short-loop/agents#56) and `104ed89` (short-loop/agents#58, "winner id race"). 1.8.3: `0e1e1241c` (P3, with the telemetry follow-ups below) |
 | **Depends on** | — |
-| **Automated tests** | None |
+| **Automated tests** | `tests/test_llm_parallel_adapter.py` (entry validation, fastest entry wins with `parallel_selected`, all-fail error) |
+| **Code markers** | none (fork-only module) |
 
 ## Why
 
@@ -20,7 +21,10 @@ whichever answers first cuts p99 reply latency on voice calls.
 - `ParallelLLMEntry` is a frozen dataclass pairing an LLM with a label. The adapter
   **overwrites each LLM's internal `_label`** with that label, so upstream metrics and
   traces identify the backend by it.
-- `model` is "ParallelAdapter"; `provider` is "livekit".
+- `model`, `provider` and `metrics_metadata` report the entry that most recently won a
+  race (`_active_instance`; the first entry before any traffic), like upstream's
+  `FallbackAdapter`, so spans and metrics name a real backend.
+- `prewarm(loop=)` is forwarded to **every** entry (they all race).
 - `chat(...)` returns a `ParallelLLMStream` which, when run:
   1. starts one task per entry calling that LLM's `chat` with the same chat context,
      tools, `parallel_tool_calls`, `tool_choice`, `extra_kwargs`, and connection options
@@ -37,7 +41,12 @@ whichever answers first cuts p99 reply latency on voice calls.
   metrics whose `request_id` matches the winning request (the first chunk's `id`), and
   sets `LLMMetrics.parallel_selected = True` on them. The adapter's own stream disables
   the base metrics monitor (so there is no duplicate metric for the adapter itself).
-  Tracing span name is `llm_parallel_adapter`.
+- **Tracing (1.8):** the wrapper span is `llm_parallel_adapter` with
+  `_genai_operation_name = None` (the entries' own request spans own the `chat`
+  operation, as upstream does for `FallbackAdapter`, #7373). After the race the winner's
+  `lk.parallel.label`, `lk.parallel.index`, `gen_ai.request.model`,
+  `gen_ai.response.model` and normalised `gen_ai.provider.name` are set on the current
+  span and on `_llm_request_span`.
 - `LLMMetrics` gains an optional `parallel_selected` field (None when the metric does
   not come from a ParallelAdapter).
 - `aclose()` unsubscribes from the children's metrics events (it does not close the
@@ -67,8 +76,10 @@ contracts below).
 - `LLM.chat(...)` keyword signature: `chat_ctx`, `tools`, `conn_options`,
   `parallel_tool_calls`, `tool_choice`, `extra_kwargs`.
 - `LLMStream.__init__(llm, chat_ctx=, tools=, conn_options=)`, `_run`, `_event_ch`,
-  `_chat_ctx`, `_tools`, `_metrics_monitor_task(event_aiter)`, class attribute
-  `_llm_request_span_name`.
+  `_chat_ctx`, `_tools`, `_metrics_monitor_task(event_aiter)`, class attributes
+  `_llm_request_span_name` / `_genai_operation_name`, `_llm_request_span`.
+- `LLM.prewarm(loop=)`, `LLM.metrics_metadata`; `telemetry.trace_types` attribute names
+  and `gen_ai_provider_name()`.
 - `ChatChunk.id` equals `LLMMetrics.request_id` of the same request.
 - `APIConnectOptions(max_retry=, timeout=)`.
 
@@ -81,7 +92,7 @@ contracts after every sync and run a type check.
 
 ## Verification after sync
 
-- Type check passes for `llm/parallel_adapter.py`.
+- Type check passes for `llm/parallel_adapter.py`; `tests/test_llm_parallel_adapter.py` passes.
 - `LLM.chat` in upstream `llm/llm.py` has no new parameters that the adapter fails to
   accept and forward.
 - `from livekit.agents.llm import ParallelAdapter, ParallelLLMEntry` still works.

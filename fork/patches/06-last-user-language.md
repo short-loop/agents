@@ -3,9 +3,10 @@
 | | |
 |---|---|
 | **Status** | Always-on |
-| **Origin** | Fork commit `d7081f0` (short-loop/agents#56, "chore: migrate sl patches") |
+| **Origin** | 1.4.6: fork commit `d7081f0` (short-loop/agents#56). 1.8.3: `a3e52f52f` (P7, P8) |
 | **Depends on** | — |
 | **Automated tests** | None |
+| **Code markers** | `fork(patch 06)` |
 
 ## Why
 
@@ -31,8 +32,8 @@ fewer, which dropped the language of short replies ("sí", "haan", "नहीं
 
 ## Implementation walkthrough
 
-- `livekit-agents/livekit/agents/voice/audio_recognition.py`: constant change; property
-  after `current_transcript`.
+- `livekit-agents/livekit/agents/voice/audio_recognition.py`: constant change (with a
+  `fork(patch 06)` comment); property just before `_current_transcript`.
 - `livekit-agents/livekit/agents/voice/agent_activity.py`: imports `LanguageCode`;
   property next to `current_speech`.
 - `livekit-agents/livekit/agents/voice/agent_session.py`: imports `LanguageCode`;
@@ -46,7 +47,9 @@ names), and keep the minimum-length constant at 3.
 
 ## Upstream contracts relied upon
 
-- `AudioRecognition._last_language`, updated from FINAL and PREFLIGHT transcripts.
+- `AudioRecognition._last_language`, updated from FINAL and PREFLIGHT transcripts through
+  `_update_last_language`, which since 1.6.8 also ignores non-specific codes such as
+  `multi` (helps patch 13's detector).
 - `AgentSession._activity`, `AgentActivity._audio_recognition`.
 
 ## Conflict guidance

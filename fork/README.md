@@ -6,7 +6,10 @@ Documentation for the ShortLoop patches carried on top of upstream
 hot-spot map and the upstream sync playbook.
 
 This folder contains **documentation only**: no code, no scripts. Nothing here is
-imported or packaged.
+imported or packaged. [`MIGRATION-1.8.md`](MIGRATION-1.8.md) records the one-off move from
+upstream 1.4.6 to 1.8.3 (decisions D1–D10 and the open dynamic-endpointing comparison);
+its `P1`–`P12` numbering is the interim one used in commit messages, the mapping to these
+documents is in FORK.md section 1.
 
 ## Layout
 
@@ -19,7 +22,8 @@ Every patch document uses the same sections, in this order, so an automated sync
 can find what it needs:
 
 1. **Header table**: status (Always-on / Opt-in), origin commits and fork PRs,
-   dependencies, patches it shares code with, automated tests.
+   dependencies, patches it shares code with, automated tests, code markers
+   (`fork(patch NN)` comments in upstream files).
 2. **Why**: the production problem and the evidence behind it.
 3. **Behaviour**: what changes for users of the fork, defaults, configuration knobs,
    log lines (with exact message text and field names).
@@ -39,7 +43,8 @@ can find what it needs:
 ## Adding or changing a patch
 
 - New patch: take the next free number, write the document with the sections above,
-  and add a row to FORK.md's patch index (section 2) and hot-spot map (section 3).
+  add a row to FORK.md's patch index (section 2) and hot-spot map (section 3), mark the
+  code with `fork(patch NN)`, and give any new test module a category marker.
 - Changed patch: update its document in the same PR as the code change, including the
   origin row (new fork commit or PR).
 - Removed patch: keep the file, set the status to **Dropped**, and record the reason and

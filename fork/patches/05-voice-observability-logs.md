@@ -1,94 +1,91 @@
-# Patch 05 — Voice observability logs (reply latency, silence-gate hold, interrupt debug)
+# Patch 05 — Voice observability logs (reply latency, playout hold)
 
 | | |
 |---|---|
 | **Status** | Always-on (logging only, no behaviour change) |
-| **Origin** | Fork commit `d801d7e` (short-loop/agents#59, second part: "log silence-gate holds and per-reply e2e latency", SL-3890); the interrupt debug line comes from `d7081f0` (short-loop/agents#56) |
-| **Depends on** | Patch 04 (logs include `interruption_mode`) |
+| **Origin** | 1.4.6: fork commit `d801d7e` (short-loop/agents#59, second part, SL-3890). 1.8.3: part of `19dabfdac` (P9). The 1.4.6 debug line "Speech handle interrupted, cancelling tasks" was **dropped** in the 1.8 move (D8): upstream now records the interruption source on the `agent_turn` span |
+| **Depends on** | Patch 04 (measures its hold event; logs include `interruption_mode`) |
 | **Automated tests** | None |
+| **Code markers** | `fork(patch 04)` at the call-sites, `fork(patch 04/05)` on the helper region |
 
 ## Why
 
 To evaluate the interruption-backoff modes (patch 04) and endpointing changes from
-production logs, the team needed (a) how long the silence gate actually held a ready
-reply and whether the hold turned a collision into a silent drop, and (b) a per-reply
-end-to-end latency line with its breakdown. Upstream computes e2e latency but only
-renders it in console mode.
+production logs, the team needed (a) how long the playout hold actually held a ready reply
+and whether the hold turned a collision into a silent drop, and (b) a per-reply
+end-to-end latency line with its breakdown. Upstream 1.8 exposes the same latency values
+on `ChatMessage.metrics` and as `lk.e2e_latency` on the `agent_turn` span, but the
+production dashboards grep the log line.
 
 ## Behaviour
 
-Three log lines, all in `livekit-agents/livekit/agents/voice/agent_activity.py`:
+Two log lines, both in `livekit-agents/livekit/agents/voice/agent_activity.py`:
 
 1. **debug "playout held by silence gate"** — emitted after the playout authorization
-   wait, only if the user-silence event was **closed** when the wait began and the speech
-   allows interruptions. Fields: `held` (seconds), `interruption_mode`, `speech_id`,
-   `interrupted_while_held` (true means the gate converted a would-be collision into a
-   silent drop).
-2. **info "agent reply latency"** — once per reply, when the first audio frame is played.
-   Fields: `e2e_latency` (user stopped speaking → first audio), `end_of_turn_delay`,
-   `transcription_delay` (from the user-turn metrics report), `llm_ttft`, `tts_ttfb`,
-   `interruption_mode`, `speech_id`. `speech_id` joins it with line 1.
-3. **debug "Speech handle interrupted, cancelling tasks"** with `handle_id`, in
-   `AgentActivity.interrupt` when the current speech is interrupted.
+   wait in the TTS and pipeline reply tasks, only if the hold event was **closed** when
+   the wait began and the speech allows interruptions. Fields: `held` (seconds since the
+   hold closed), `interruption_mode`, `speech_id`, `interrupted_while_held` (true means
+   the hold converted a would-be collision into a silent drop).
+2. **info "agent reply latency"** — once per pipeline reply, when the first audio frame is
+   played. Fields: `e2e_latency` (user stopped speaking → first audio),
+   `end_of_turn_delay`, `transcription_delay` (from the user-turn metrics report),
+   `llm_ttft`, `tts_ttfb` (first TTS segment), `interruption_mode`, `speech_id`.
+   `speech_id` joins it with line 1.
 
 ## Implementation walkthrough
 
-The SL-3890 code is written as **additive helper methods** so that upstream's
-authorization blocks stay byte-identical (this minimises merge conflicts). Call-sites are
-single lines marked with a `fork(SL-3890)` comment.
+The code is written as **additive helper methods** so that upstream's authorization blocks
+stay byte-identical (this minimises merge conflicts). Call-sites are single lines marked
+`fork(patch 04)`.
 
-- New methods on `AgentActivity`, placed just before `_tts_task_impl`, under a comment
-  block explaining the design:
-  - `_gate_closed_timestamp(speech_handle)` — returns now if interruptions are allowed
-    and `_user_silence_event` is not set, else None.
-  - `_log_silence_gate_hold(speech_handle, closed_at)` — logs line 1 when `closed_at` is
-    not None.
-  - `_log_reply_latency(speech_handle, *, e2e_latency, user_metrics, llm_ttft, tts_ttfb)`
-    — logs line 2.
-- `_tts_task_impl` and `_pipeline_reply_task_impl`: one line before building the
-  `authorization_tasks` list captures `_gate_closed_at`; one line after
-  `speech_handle._clear_authorization()` logs the hold.
+- Helpers in the `fork(patch 04/05)` region before `retrieve_chat_ctx`:
+  `_log_backoff_hold(speech_handle, closed_at)` (line 1) and
+  `_log_reply_latency(speech_handle, *, e2e_latency, user_metrics, llm_ttft, tts_ttfb)`
+  (line 2); both read the mode through `_backoff_mode_name()` (mock-safe).
+- `_tts_task_impl` and `_pipeline_reply_task_impl`: one line before building
+  `authorization_tasks` snapshots `_hold_closed_at = getattr(self,
+  "_backoff_hold_closed_at", None)`; one line after upstream's
+  `_record_queue_wait(speech_handle)` logs the hold.
 - `_pipeline_reply_task_impl`: inside the first-frame callback, right after upstream
   computes `early_metrics["e2e_latency"]`, one call to `_log_reply_latency` using
-  `llm_gen_data.ttft` and `tts_gen_data.ttfb` (None when there is no TTS).
-- `interrupt()`: the debug log after `self._current_speech.interrupt(force=force)`.
+  `llm_gen_data.ttft` and `first_tts_gen_data.ttfb` (None when there is no TTS).
 
 ## Re-applying the patch
 
-Keep the three helpers as-is. Re-insert the call-sites: gate snapshot immediately before
-the playout authorization wait, hold log immediately after the authorization is cleared
+Keep the helpers as-is. Re-insert the call-sites: hold snapshot immediately before the
+playout authorization wait, hold log immediately after upstream records the queue wait
 (both task impls), and the latency log wherever upstream computes the reply's e2e latency
 from the user's `stopped_speaking_at`.
 
 ## Upstream contracts relied upon
 
 - `SpeechHandle.allow_interruptions`, `.id`, `.interrupted`, `_wait_for_authorization`,
-  `_clear_authorization`.
+  `_clear_authorization`; `_record_queue_wait`.
 - The early-metrics computation in `_pipeline_reply_task_impl` (user metrics report with
   `stopped_speaking_at`, `end_of_turn_delay`, `transcription_delay`; `llm_gen_data.ttft`;
-  `tts_gen_data.ttfb`).
+  `first_tts_gen_data.ttfb`).
 
 ## Conflict guidance
 
 Conflicts should be limited to the one-line call-sites. If upstream renames or moves the
 authorization block or the e2e computation, move the call-sites with it; do not modify
-upstream's block itself. If upstream starts logging e2e latency itself, keep the fork's
-line anyway until log queries are migrated (they grep for "agent reply latency").
+upstream's block itself. Keep the fork's line even though upstream has equivalent metrics,
+until log queries are migrated (they grep for "agent reply latency").
 
 ## Verification after sync
 
-- Searching `agent_activity.py` for `fork(SL-3890)` finds seven hits: the five call-sites
-  (two gate snapshots, two hold logs, one latency log), the comment block above the
-  helpers, and the `_log_reply_latency` docstring.
+- Searching `agent_activity.py` for `fork(patch 04` finds the hold snapshots and hold logs
+  in both task impls and the latency call in the pipeline task.
 - The helper methods exist and type-check.
 
 ## Known caveats
 
 - The measured `held` includes any concurrent authorization wait; it is only logged when
-  the gate was closed at wait start, which is what makes it attributable to user speech.
-- Realtime-model replies (`_realtime_reply_task` path) do not get the latency line.
+  the hold was closed at wait start, which is what makes it attributable to user speech.
+- Realtime-model replies (`_realtime_reply_task`, `_realtime_generation_task`) honour the
+  hold but do not get either log line.
 
 ## Drop criteria
 
-Upstream emits equivalent structured per-reply latency and playout-hold telemetry, and
-production dashboards have been migrated to it.
+Production dashboards migrated to upstream's `ChatMessage.metrics` /
+`session_usage_updated` / span attributes.

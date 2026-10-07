@@ -14,13 +14,6 @@ from ..io import TextOutput
 if TYPE_CHECKING:
     from ..agent_session import AgentSession
 
-
-DEFAULT_PARTICIPANT_KINDS: list[rtc.ParticipantKind.ValueType] = [
-    rtc.ParticipantKind.PARTICIPANT_KIND_SIP,
-    rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD,
-    rtc.ParticipantKind.PARTICIPANT_KIND_CONNECTOR,
-]
-
 DEFAULT_CLOSE_ON_DISCONNECT_REASONS: list[rtc.DisconnectReason.ValueType] = [
     rtc.DisconnectReason.CLIENT_INITIATED,
     rtc.DisconnectReason.ROOM_DELETED,
@@ -31,8 +24,8 @@ DEFAULT_CLOSE_ON_DISCONNECT_REASONS: list[rtc.DisconnectReason.ValueType] = [
 @dataclass
 class TextInputEvent:
     text: str
-    info: rtc.TextStreamInfo
-    participant: rtc.RemoteParticipant
+    info: rtc.TextStreamInfo | None = None
+    participant: rtc.RemoteParticipant | None = None
 
 
 TextInputCallback = Callable[["AgentSession", TextInputEvent], Coroutine[None, None, None] | None]
@@ -51,8 +44,9 @@ NoiseCancellationSelector: TypeAlias = Callable[
 
 
 async def _default_text_input_cb(sess: AgentSession, ev: TextInputEvent) -> None:
-    await sess.interrupt()
-    sess.generate_reply(user_input=ev.text)
+    async with sess._claim_user_turn():
+        await sess.interrupt()
+        sess.generate_reply(user_input=ev.text)
 
 
 @dataclass
@@ -72,6 +66,10 @@ class AudioInputOptions:
         | rtc.FrameProcessor[rtc.AudioFrame]
         | None
     ) = None
+    auto_gain_control: NotGivenOr[bool] = NOT_GIVEN
+    """Enable automatic gain control (AGC) on the input audio.
+    If not given, disabled when noise cancellation is configured directly.
+    Set explicitly when using a noise cancellation selector."""
     pre_connect_audio: bool = True
     """Pre-connect audio enabled or not."""
     pre_connect_audio_timeout: float = 3.0
@@ -93,7 +91,7 @@ class AudioOutputOptions:
     track_name: NotGivenOr[str] = NOT_GIVEN
     """The name of the audio track to publish. If not provided, default to "roomio_audio"."""
     max_volume: float = 1.0
-    """Maximum volume for audio output (0.0-1.0). Default 1.0 (no attenuation)."""
+    """fork(patch 09): maximum volume for audio output (0.0-1.0). Default 1.0 (no attenuation)."""
 
 
 @dataclass
@@ -106,6 +104,8 @@ class TextOutputOptions:
     Only effective if `sync_transcription` is True."""
     next_in_chain: TextOutput | None = None
     """The next text output in the chain for the agent. If provided, the agent's transcription will be passed to it."""
+    json_format: bool = False
+    """Send the transcription as JSON dict for each chunk, including start and end timestamps if it's a TimedString."""
 
 
 @dataclass
@@ -294,7 +294,7 @@ class RoomOutputOptions:
     """Speed factor of transcription synchronization with audio output.
     Only effective if `sync_transcription` is True."""
     max_volume: float = 1.0
-    """Maximum volume for audio output (0.0-1.0). Default 1.0 (no attenuation)."""
+    """fork(patch 09): maximum volume for audio output (0.0-1.0). Default 1.0 (no attenuation)."""
 
 
 # DEFAULT_ROOM_INPUT_OPTIONS = RoomInputOptions()

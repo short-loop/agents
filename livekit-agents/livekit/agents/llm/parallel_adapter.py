@@ -5,14 +5,21 @@ from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from opentelemetry import trace
+
 from .._exceptions import APIConnectionError
 from ..log import logger
 from ..metrics import LLMMetrics
+from ..telemetry import trace_types
 from ..types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, APIConnectOptions, NotGivenOr
 from ..utils import aio
-from .chat_context import ChatContext
+from .chat_context import ChatContext, MetricsMetadata
 from .llm import LLM, ChatChunk, LLMStream
 from .tool_context import Tool, ToolChoice
+
+# fork: which entry won the race, stamped on the request span (mirrors lk.fallback.*)
+_ATTR_PARALLEL_LABEL = "lk.parallel.label"
+_ATTR_PARALLEL_INDEX = "lk.parallel.index"
 
 
 @dataclass(frozen=True)
@@ -57,16 +64,25 @@ class ParallelAdapter(LLM):
         self._attempt_timeout = attempt_timeout
         self._winning_request_ids: set[str] = set()
 
+        # the entry that most recently won a race; used to label metrics & traces
+        self._active_instance: LLM = self._entries[0].llm
+
         for entry in self._entries:
             entry.llm.on("metrics_collected", self._on_metrics_collected)
 
     @property
     def model(self) -> str:
-        return "ParallelAdapter"
+        """The model of the entry that most recently won (the first entry before any traffic).
+        Spans and metrics read this; the entry that actually served is stamped per request."""
+        return self._active_instance.model
 
     @property
     def provider(self) -> str:
-        return "livekit"
+        return self._active_instance.provider
+
+    @property
+    def metrics_metadata(self) -> MetricsMetadata:
+        return self._active_instance.metrics_metadata
 
     def chat(
         self,
@@ -88,6 +104,11 @@ class ParallelAdapter(LLM):
             extra_kwargs=extra_kwargs,
         )
 
+    def prewarm(self, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Pre-warm every entry: all of them race on each request."""
+        for entry in self._entries:
+            entry.llm.prewarm(loop=loop)
+
     async def aclose(self) -> None:
         for entry in self._entries:
             entry.llm.off("metrics_collected", self._on_metrics_collected)
@@ -101,6 +122,8 @@ class ParallelAdapter(LLM):
 
 class ParallelLLMStream(LLMStream):
     _llm_request_span_name: ClassVar[str] = "llm_parallel_adapter"
+    # the entries' own request spans own the inference operation
+    _genai_operation_name: ClassVar[str | None] = None
 
     def __init__(
         self,
@@ -158,6 +181,7 @@ class ParallelLLMStream(LLMStream):
                         if winner_index is None:
                             winner_index = index
                             self._current_stream = stream
+                            self._parallel_adapter._active_instance = llm_instance
                             logger.debug(
                                 "llm.ParallelAdapter: %s won the race",
                                 llm_instance.label,
@@ -208,6 +232,20 @@ class ParallelLLMStream(LLMStream):
                     "all LLMs failed in parallel "
                     f"({[entry.label for entry in self._parallel_adapter._entries]})"
                 )
+
+            winner = self._parallel_adapter._entries[winner_index]
+            provider = trace_types.gen_ai_provider_name(winner.llm.provider)
+            served: dict[str, Any] = {
+                _ATTR_PARALLEL_LABEL: winner.label,
+                _ATTR_PARALLEL_INDEX: winner_index,
+                trace_types.ATTR_GEN_AI_REQUEST_MODEL: winner.llm.model,
+                trace_types.ATTR_GEN_AI_RESPONSE_MODEL: winner.llm.model,
+            }
+            if provider:
+                served[trace_types.ATTR_GEN_AI_PROVIDER_NAME] = provider
+            trace.get_current_span().set_attributes(served)
+            if self._llm_request_span is not None:
+                self._llm_request_span.set_attributes(served)
         finally:
             for i, task in enumerate(tasks):
                 if i != winner_index and not task.done():

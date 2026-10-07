@@ -1,9 +1,13 @@
+import pytest
+
 from livekit.agents.voice.interruption_tracker import (
     InterruptionBackoffOptions,
     InterruptionMode,
     InterruptionModeSettings,
     InterruptionTracker,
 )
+
+pytestmark = pytest.mark.unit
 
 OPTS = InterruptionBackoffOptions(
     transient_entry_count=2,

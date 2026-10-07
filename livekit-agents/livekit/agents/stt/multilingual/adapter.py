@@ -6,7 +6,7 @@ import time
 import weakref
 from collections.abc import AsyncIterable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from livekit import rtc
 
@@ -45,6 +45,9 @@ from .executors import (
     _SwitchExecutor,
 )
 from .heuristics import SwitchDecision, SwitchSuppressed, _HeuristicEngine
+
+if TYPE_CHECKING:
+    from ...voice.events import ConversationItemAddedEvent
 
 # retries are owned by the child streams (and, when the caller passes retryful
 # conn options, by the base RecognizeStream retry loop rebuilding both children)
@@ -192,6 +195,8 @@ class MultilingualAdapter(
                 diarization=primary.capabilities.diarization,
                 aligned_transcript=primary.capabilities.aligned_transcript,
                 offline_recognize=primary.capabilities.offline_recognize,
+                keyterms=primary.capabilities.keyterms,
+                chat_context=primary.capabilities.chat_context,
             )
         )
 
@@ -202,6 +207,8 @@ class MultilingualAdapter(
         self._allowed = allowed
         self._current_language = language
         self._owned_stts = owned_stts
+        # framework-managed keyterms, re-applied to primaries built later by the factory
+        self._session_keyterms: list[str] | None = None
 
         self._streams: weakref.WeakSet[MultilingualRecognizeStream] = weakref.WeakSet()
         self._hooked_stts: list[STT] = []
@@ -224,6 +231,20 @@ class MultilingualAdapter(
     @property
     def options(self) -> LanguageSwitchOptions:
         return self._opts
+
+    def _update_session_keyterms(self, keyterms: list[str]) -> None:
+        self._session_keyterms = keyterms
+        self._primary._update_session_keyterms(keyterms)
+        self._detector._update_session_keyterms(keyterms)
+
+    def _push_conversation_item(self, ev: ConversationItemAddedEvent) -> None:
+        self._primary._push_conversation_item(ev)
+        self._detector._push_conversation_item(ev)
+
+    def prewarm(self) -> None:
+        # every child races on live audio, so both connections are worth warming
+        self._primary.prewarm()
+        self._detector.prewarm()
 
     async def _recognize_impl(
         self,
@@ -304,6 +325,8 @@ class MultilingualAdapter(
     def _adopt_stt(self, stt_instance: STT) -> None:
         self._owned_stts.append(stt_instance)
         self._hook_metrics(stt_instance)
+        if self._session_keyterms is not None:
+            stt_instance._update_session_keyterms(self._session_keyterms)
 
     def _release_stt(self, stt_instance: STT) -> None:
         if stt_instance in self._owned_stts:

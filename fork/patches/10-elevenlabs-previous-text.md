@@ -3,9 +3,10 @@
 | | |
 |---|---|
 | **Status** | Always-on for the ElevenLabs TTS plugin (not configurable) |
-| **Origin** | Fork commit `d7081f0` (short-loop/agents#56, "chore: migrate sl patches") |
+| **Origin** | 1.4.6: fork commit `d7081f0` (short-loop/agents#56). 1.8.3: `3c69f69e2` (P12); kept as a literal per decision D5 |
 | **Depends on** | — |
 | **Automated tests** | None |
+| **Code markers** | `fork(patch 10)` |
 
 ## Why
 
@@ -17,18 +18,20 @@ calmer and more consistent across short, independent utterances on calls.
 
 The fixed string **"And she softly spoke : "** is sent as `previous_text` on:
 
-1. the HTTP (non-streaming) synthesis request body in `ChunkedStream._run`, next to
+1. the HTTP (non-streaming) synthesis body built by `_build_synthesize_body`, next to
    `text`, `model_id` and `voice_settings`;
-2. the WebSocket context-initialisation packet in `_Connection._send_loop` (the packet with
-   `"text": " "`, `voice_settings` and `context_id`, sent when a new context starts).
+2. the WebSocket context-initialisation packet built by `_build_context_init_packet` (the
+   packet with `"text": " "`, `voice_settings` and `context_id`, sent when a new context
+   starts).
 
-Every ElevenLabs synthesis through this fork therefore carries the prefix, regardless of
-voice or language.
+Not sent on the text-to-dialogue path (`_build_dialogue_context_init_packet`, used for
+`eleven_v3*` models), which has no such field. Every other ElevenLabs synthesis through
+this fork carries the prefix, regardless of voice or language.
 
 ## Implementation walkthrough
 
-`livekit-plugins/livekit-plugins-elevenlabs/livekit/plugins/elevenlabs/tts.py`: one
-dictionary key added in each of the two payloads.
+`livekit-plugins/livekit-plugins-elevenlabs/livekit/plugins/elevenlabs/tts.py`: module
+constant `_PREVIOUS_TEXT` and one dictionary key added in each of the two builder helpers.
 
 ## Re-applying the patch
 

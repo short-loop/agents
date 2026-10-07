@@ -23,6 +23,8 @@ from livekit.agents.stt import (
 
 from .fake_multilingual_stt import ScriptedStream, ScriptedSTT, make_frame
 
+pytestmark = pytest.mark.unit
+
 FAST_OPTIONS = LanguageSwitchOptions(
     switch_grace_s=0.1,
     boundary_silence_s=0.05,

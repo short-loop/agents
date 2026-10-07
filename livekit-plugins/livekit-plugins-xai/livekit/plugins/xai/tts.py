@@ -20,6 +20,7 @@ import json
 import os
 import weakref
 from dataclasses import dataclass, replace
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -41,7 +42,7 @@ from .types import GrokVoices, TTSLanguages
 SAMPLE_RATE = 24000
 NUM_CHANNELS = 1
 
-XAI_WEBSOCKET_URL = "wss://api.x.ai/v1/realtime/audio/speech"
+XAI_WEBSOCKET_URL = "wss://api.x.ai/v1/tts"
 DEFAULT_VOICE = "ara"
 
 
@@ -50,6 +51,9 @@ class _TTSOptions:
     voice: GrokVoices | str
     language: TTSLanguages | str
     tokenizer: tokenize.WordTokenizer
+    optimize_streaming_latency: NotGivenOr[int]
+    speed: NotGivenOr[float]
+    text_normalization: NotGivenOr[bool]
 
 
 class TTS(tts.TTS):
@@ -59,6 +63,9 @@ class TTS(tts.TTS):
         api_key: NotGivenOr[str] = NOT_GIVEN,
         voice: GrokVoices | str = DEFAULT_VOICE,
         language: TTSLanguages | str = "auto",
+        optimize_streaming_latency: NotGivenOr[int] = NOT_GIVEN,
+        speed: NotGivenOr[float] = NOT_GIVEN,
+        text_normalization: NotGivenOr[bool] = NOT_GIVEN,
         tokenizer: tokenize.WordTokenizer | None = None,
         http_session: aiohttp.ClientSession | None = None,
     ) -> None:
@@ -70,6 +77,9 @@ class TTS(tts.TTS):
         Args:
             voice (str, optional): The voice ID for the desired voice. Defaults to "ara".
             language (TTSLanguages | str, optional): Language code for synthesis (e.g., "en", "fr", "ja"). Defaults to "auto".
+            optimize_streaming_latency (int, optional): Latency optimization level for the xAI TTS websocket.
+            speed (float, optional): Speaking-rate multiplier for the generated audio.
+            text_normalization (bool, optional): Whether to normalize text before synthesis.
             api_key (str | None, optional): The xAI API key. If not provided, it will be read from the xAI environment variable.
             http_session (aiohttp.ClientSession | None, optional): An existing aiohttp ClientSession to use. If not provided, a new session will be created.
         """  # noqa: E501
@@ -92,10 +102,26 @@ class TTS(tts.TTS):
             voice=voice,
             language=language,
             tokenizer=tokenizer,
+            optimize_streaming_latency=optimize_streaming_latency,
+            speed=speed,
+            text_normalization=text_normalization,
         )
 
         self._session = http_session
         self._streams = weakref.WeakSet[SynthesizeStream]()
+        self._pool = utils.ConnectionPool[aiohttp.ClientWebSocketResponse](
+            connect_cb=self._connect_pooled_ws,
+            close_cb=self._close_pooled_ws,
+            # xAI's TTS server enforces an undocumented ~2100s deadline per websocket
+            # connection; stay below it so connections rotate before the server kills them
+            max_session_duration=1800,
+            mark_refreshed_on_get=False,
+        )
+
+    class Markup(tts.TTS.Markup):
+        # markup delegation lives in the base class, keyed on _provider_key()
+        def _provider_key(self) -> str:
+            return "xai"
 
     @property
     def model(self) -> str:
@@ -105,39 +131,51 @@ class TTS(tts.TTS):
     def provider(self) -> str:
         return "xAI"
 
-    async def _connect_ws(self, timeout: float) -> aiohttp.ClientWebSocketResponse:
+    async def _connect_ws(
+        self, timeout: float, opts: _TTSOptions
+    ) -> aiohttp.ClientWebSocketResponse:
+        params: dict[str, str | int | float] = {
+            "voice": opts.voice,
+            "language": opts.language,
+            "codec": "pcm",
+            "sample_rate": SAMPLE_RATE,
+        }
+        if is_given(opts.optimize_streaming_latency):
+            params["optimize_streaming_latency"] = opts.optimize_streaming_latency
+        if is_given(opts.speed):
+            params["speed"] = opts.speed
+        if is_given(opts.text_normalization):
+            params["text_normalization"] = str(opts.text_normalization).lower()
+
+        url = f"{XAI_WEBSOCKET_URL}?{urlencode(params)}"
         try:
             ws = await asyncio.wait_for(
                 self._ensure_session().ws_connect(
-                    XAI_WEBSOCKET_URL,
+                    url,
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 ),
                 timeout,
             )
-            config_msg = {
-                "type": "config",
-                "data": {
-                    "voice_id": self._opts.voice,
-                    "language": self._opts.language,
-                    "output_format": {"Raw": {"encoding": "Linear16"}},
-                    "sample_rate_hertz": "Hz24000",
-                },
-            }
-            try:
-                await ws.send_str(json.dumps(config_msg))
-            except Exception:
-                await ws.close()
-                raise
-        except (
-            aiohttp.ClientConnectorError,
-            aiohttp.ClientConnectionResetError,
-            asyncio.TimeoutError,
-        ) as e:
-            raise APIConnectionError("failed to connect to xAI") from e
+        except asyncio.TimeoutError:
+            raise APIConnectionError("failed to connect to xAI") from None
+        except aiohttp.ClientResponseError as e:
+            # RequestInfo carries the request headers, so chaining this error or
+            # formatting it puts the API key in the exception repr (#6739).
+            raise APIStatusError(
+                message=e.message, status_code=e.status, request_id=None, body=None
+            ) from None
+        except Exception as e:
+            raise APIConnectionError(f"failed to connect to xAI ({type(e).__name__})") from None
         return ws
 
     async def _close_ws(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         await ws.close()
+
+    async def _connect_pooled_ws(self, timeout: float) -> aiohttp.ClientWebSocketResponse:
+        return await self._connect_ws(timeout, self._opts)
+
+    async def _close_pooled_ws(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        await self._close_ws(ws)
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if not self._session:
@@ -149,6 +187,9 @@ class TTS(tts.TTS):
         *,
         voice: str | None = None,
         language: TTSLanguages | str | None = None,
+        optimize_streaming_latency: NotGivenOr[int] = NOT_GIVEN,
+        speed: NotGivenOr[float] = NOT_GIVEN,
+        text_normalization: NotGivenOr[bool] = NOT_GIVEN,
     ) -> None:
         """
         Update the Text-to-Speech (TTS) configuration options.
@@ -156,9 +197,39 @@ class TTS(tts.TTS):
         Args:
             voice (str, optional): The voice ID for the desired voice.
             language (TTSLanguages | str, optional): Language code for synthesis (e.g., "en", "fr", "ja").
+            optimize_streaming_latency (int, optional): Latency optimization level for the xAI TTS websocket.
+            speed (float, optional): Speaking-rate multiplier for the generated audio.
+            text_normalization (bool, optional): Whether to normalize text before synthesis.
         """  # noqa: E501
+        connection_options_before = (
+            self._opts.voice,
+            self._opts.language,
+            self._opts.optimize_streaming_latency,
+            self._opts.speed,
+            self._opts.text_normalization,
+        )
+
         self._opts.voice = voice or self._opts.voice
         self._opts.language = language or self._opts.language
+        if is_given(optimize_streaming_latency):
+            self._opts.optimize_streaming_latency = optimize_streaming_latency
+        if is_given(speed):
+            self._opts.speed = speed
+        if is_given(text_normalization):
+            self._opts.text_normalization = text_normalization
+
+        connection_options_after = (
+            self._opts.voice,
+            self._opts.language,
+            self._opts.optimize_streaming_latency,
+            self._opts.speed,
+            self._opts.text_normalization,
+        )
+        if connection_options_after != connection_options_before:
+            self._pool.invalidate()
+
+    def prewarm(self) -> None:
+        self._pool.prewarm()
 
     def synthesize(
         self,
@@ -180,6 +251,7 @@ class TTS(tts.TTS):
             await stream.aclose()
 
         self._streams.clear()
+        await self._pool.aclose()
 
 
 class SynthesizeStream(tts.SynthesizeStream):
@@ -193,7 +265,6 @@ class SynthesizeStream(tts.SynthesizeStream):
         super().__init__(tts=tts, conn_options=conn_options)
         self._tts: TTS = tts
         self._opts = replace(tts._opts)
-        self._segments_ch = utils.aio.Chan[tokenize.WordStream]()
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         request_id = utils.shortuuid()
@@ -205,23 +276,25 @@ class SynthesizeStream(tts.SynthesizeStream):
             mime_type="audio/pcm",
         )
 
+        segments_ch = utils.aio.Chan[tokenize.WordStream]()
+
         async def _tokenize_input() -> None:
             input_stream = None
             async for input in self._input_ch:
                 if isinstance(input, str):
                     if input_stream is None:
                         input_stream = self._opts.tokenizer.stream()
-                        self._segments_ch.send_nowait(input_stream)
+                        segments_ch.send_nowait(input_stream)
                     input_stream.push_text(input)
                 elif isinstance(input, self._FlushSentinel):
                     if input_stream:
                         input_stream.end_input()
                     input_stream = None
 
-            self._segments_ch.close()
+            segments_ch.close()
 
         async def _run_segments() -> None:
-            async for input_stream in self._segments_ch:
+            async for input_stream in segments_ch:
                 await self._run_ws(input_stream, output_emitter)
 
         tasks = [
@@ -255,14 +328,9 @@ class SynthesizeStream(tts.SynthesizeStream):
             nonlocal input_ended
 
             async for word in input_stream:
-                text_chunk_msg = {
-                    "type": "text_chunk",
-                    "data": {"text": f"{word.token}", "is_last": False},
-                }
                 self._mark_started()
-                await ws.send_str(json.dumps(text_chunk_msg))
-            last_msg = {"type": "text_chunk", "data": {"text": "", "is_last": True}}
-            await ws.send_str(json.dumps(last_msg))
+                await ws.send_str(json.dumps({"type": "text.delta", "delta": word.token}))
+            await ws.send_str(json.dumps({"type": "text.done"}))
             input_ended = True
 
         async def _recv_task(ws: aiohttp.ClientWebSocketResponse) -> None:
@@ -283,26 +351,31 @@ class SynthesizeStream(tts.SynthesizeStream):
                     logger.warning("Unexpected xAI message type %s", msg.type)
                     continue
 
-                msg = json.loads(msg.data)
-                if msg["data"].get("type") == "audio":
-                    if msg["data"]["data"].get("audio", None):
-                        b64data = base64.b64decode(msg["data"]["data"]["audio"])
-                        output_emitter.push(b64data)
-
-                    if msg["data"]["data"].get("is_last") and input_ended:
+                data = json.loads(msg.data)
+                msg_type = data.get("type")
+                if msg_type == "audio.delta":
+                    output_emitter.push(base64.b64decode(data["delta"]))
+                elif msg_type == "audio.done":
+                    if input_ended:
                         output_emitter.end_segment()
                         break
-
+                elif msg_type == "error":
+                    raise APIStatusError(
+                        data.get("message", "unknown xAI error"),
+                        status_code=-1,
+                        body=str(data),
+                    )
                 else:
-                    logger.error("Unexpected xAI message %s", msg)
+                    logger.warning("Unexpected xAI message", extra={"lk.pii.data": data})
 
-        ws = await self._tts._connect_ws(self._conn_options.timeout)
-        tasks = [
-            asyncio.create_task(_send_task(ws)),
-            asyncio.create_task(_recv_task(ws)),
-        ]
-        try:
-            await asyncio.gather(*tasks)
-        finally:
-            await utils.aio.gracefully_cancel(*tasks)
-            await self._tts._close_ws(ws)
+        async with self._tts._pool.connection(timeout=self._conn_options.timeout) as ws:
+            self._acquire_time = self._tts._pool.last_acquire_time
+            self._connection_reused = self._tts._pool.last_connection_reused
+            tasks = [
+                asyncio.create_task(_send_task(ws)),
+                asyncio.create_task(_recv_task(ws)),
+            ]
+            try:
+                await asyncio.gather(*tasks)
+            finally:
+                await utils.aio.gracefully_cancel(*tasks)

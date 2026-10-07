@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import textwrap
 import time
 from collections.abc import Generator, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias, overload
@@ -22,8 +25,10 @@ from pydantic import BaseModel, Field, PrivateAttr, TypeAdapter
 from typing_extensions import TypedDict
 
 from livekit import rtc
+from livekit.protocol.agent_pb import agent_session as agent_pb
 
 from .. import utils
+from .._proto import encode_chat_item
 from ..log import logger
 from ..types import NOT_GIVEN, NotGivenOr
 from ..utils.misc import is_given
@@ -33,119 +38,118 @@ if TYPE_CHECKING:
     from ..llm import LLM, Tool, Toolset
 
 
-class Instructions(str):
-    """Instructions that adapt based on the user's input modality (audio vs. text).
+class Instructions:
+    """Instructions with optional modality-specific additions.
 
-    ``str(self)`` is what providers see when treating this as a plain string.
-    By default it equals the ``audio`` variant; after :meth:`as_modality` it
-    equals the chosen variant.
+    Construction::
 
-    ``_audio_variant`` and ``_text_variant`` are always preserved so
-    :meth:`as_modality` can be called again for a different modality (e.g.,
-    when the same ``ChatContext`` is reused across tool-call turns).
+        # Simple — same instructions for all modalities
+        Instructions("You are a helpful assistant.")
+
+        # With modality-specific additions
+        Instructions(
+            "You are a helpful assistant.",
+            audio="Keep responses short for voice.",
+            text="Use markdown formatting.",
+        )
+
+    Rendering::
+
+        instr.render()                              # → common text
+        instr.render(modality="audio")               # → common + audio addition
+        instr.render(modality="text", name="Alex")   # → common + text, with {name} filled
     """
 
-    _audio_variant: str
-    _text_variant: str | None
+    def __init__(
+        self,
+        common: str = "",
+        *,
+        audio: str | None = None,
+        text: str | None = None,
+    ) -> None:
+        self.common = common
+        self.audio = audio
+        self.text = text
 
-    def __new__(
-        cls, audio: str, *, text: str | None = None, _represent: str | None = None
-    ) -> Instructions:
-        """Create an Instructions object.
+    def render(
+        self,
+        *,
+        modality: Literal["audio", "text"] | None = None,
+        data: dict[str, object] | None = None,
+    ) -> str:
+        """Render instructions to a plain string.
 
         Args:
-            audio: The audio (voice) variant.
-            text: The text variant.  Falls back to ``audio`` when omitted.
+            modality: If given, appends the modality-specific addition to the common text.
+            data: Template variables to fill. Missing placeholders log a warning
+                and are replaced with empty strings.
         """
-        instance = super().__new__(cls, _represent if _represent is not None else audio)
-        instance._audio_variant = audio
-        instance._text_variant = text
-        return instance
+        parts = [self.common]
+        if modality is not None:
+            addition = self.audio if modality == "audio" else self.text
+            if addition:
+                parts.append(addition)
 
-    @property
-    def audio(self) -> str:
-        """The audio (voice) variant of the instructions."""
-        return self._audio_variant
+        result = "\n\n".join(p for p in parts if p)
 
-    @property
-    def text(self) -> str:
-        """The text variant of the instructions.
+        if data:
+            result = utils.misc.safe_render(result, data)
 
-        Falls back to the audio variant when no text variant was provided.
+        return result
+
+    @staticmethod
+    def resolve_template(template: str, **kwargs: object) -> Instructions:
+        """Fill a template string, producing an ``Instructions`` with modality variants.
+
+        If any kwarg value is an ``Instructions`` object, its ``common``/``audio``/``text``
+        parts are substituted into the matching variant of the result. This is used by
+        workflow tasks to build modality-aware instructions from a single template.
         """
-        return self._text_variant if self._text_variant is not None else self._audio_variant
+        any_instructions = any(isinstance(v, Instructions) for v in kwargs.values())
+        if any_instructions:
+            audio_kw: dict[str, object] = {
+                # an explicit "" removes the section; only None falls back to common
+                k: (v.audio if v.audio is not None else str(v))
+                if isinstance(v, Instructions)
+                else v
+                for k, v in kwargs.items()
+            }
+            text_kw: dict[str, object] = {
+                k: (v.text if v.text is not None else str(v)) if isinstance(v, Instructions) else v
+                for k, v in kwargs.items()
+            }
+            # audio/text hold fully rendered variants of the whole template, so they go in
+            # place of common (which render() would otherwise prepend, doubling the template).
+            audio = utils.misc.safe_render(template, audio_kw)
+            text = utils.misc.safe_render(template, text_kw)
+            if audio == text:
+                # no modality-specific differences; a single common variant renders correctly
+                # with or without a modality
+                return Instructions(common=audio)
+            return Instructions(common="", audio=audio, text=text)
+        else:
+            rendered = utils.misc.safe_render(template, kwargs)
+            return Instructions(common=rendered)
 
-    def as_modality(self, modality: Literal["audio", "text"]) -> Instructions:
-        """Return a copy whose ``str`` value is the correct variant for *modality*.
-
-        Both ``_audio_variant`` and ``_text_variant`` are preserved so this can
-        be called again for a different modality (e.g. across tool-call turns).
-        """
-        return Instructions(
-            audio=self._audio_variant,
-            text=self._text_variant,
-            _represent=self.audio if modality == "audio" else self.text,
-        )
-
-    def __add__(self, other: object) -> Instructions:
-        """Concatenate, propagating both variants and the current str value."""
-        if isinstance(other, Instructions):
-            has_text = self._text_variant is not None or other._text_variant is not None
-            return Instructions(
-                audio=self.audio + other.audio,
-                text=(self.text + other.text) if has_text else None,
-                _represent=str(self) + str(other),
-            )
-        if isinstance(other, str):
-            return Instructions(
-                audio=self.audio + other,
-                text=(self._text_variant + other) if self._text_variant is not None else None,
-                _represent=str(self) + other,
-            )
-        raise TypeError(f"Cannot add Instructions and {type(other)}")
-
-    def __radd__(self, other: object) -> Instructions:
-        """Support ``plain_str + Instructions``, propagating both variants."""
-        if isinstance(other, str):
-            return Instructions(
-                audio=other + self.audio,
-                text=(other + self._text_variant) if self._text_variant is not None else None,
-                _represent=other + str(self),
-            )
-        raise TypeError(f"Cannot add {type(other)} and Instructions")
+    def __str__(self) -> str:
+        return self.common
 
     def __repr__(self) -> str:
-        return f"Instructions({str(self)!r})"
+        return f"Instructions({self.common!r})"
 
-    @classmethod
-    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any) -> Any:
-        from pydantic_core import core_schema
+    def __hash__(self) -> int:
+        return hash((self.common, self.audio, self.text))
 
-        def validate_python(v: Any) -> Instructions:
-            if isinstance(v, Instructions):
-                return v
-            if isinstance(v, dict) and v.get("type") == "instructions":
-                return cls(v["audio"], text=v.get("text"))
-            raise ValueError(f"Cannot convert {type(v)!r} to Instructions")
-
-        def validate_json(v: Any) -> Instructions:
-            if isinstance(v, dict) and v.get("type") == "instructions":
-                return cls(v["audio"], text=v.get("text"))
-            raise ValueError(f"Cannot convert {type(v)!r} to Instructions")
-
-        def serialize(v: Instructions) -> dict[str, Any]:
-            d: dict[str, Any] = {"type": "instructions", "audio": v.audio}
-            if v._text_variant is not None:
-                d["text"] = v._text_variant
-            return d
-
-        return core_schema.json_or_python_schema(
-            python_schema=core_schema.no_info_plain_validator_function(validate_python),
-            json_schema=core_schema.no_info_plain_validator_function(validate_json),
-            serialization=core_schema.plain_serializer_function_ser_schema(
-                serialize, info_arg=False
-            ),
-        )
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Instructions):
+            return (
+                self.common == other.common
+                and self.audio == other.audio
+                and self.text == other.text
+            )
+        if isinstance(other, str):
+            return self.common == other
+        return NotImplemented
 
 
 class ImageContent(BaseModel):
@@ -181,7 +185,8 @@ class ImageContent(BaseModel):
 
     id: str = Field(default_factory=lambda: utils.shortuuid("img_"))
     """
-    Unique identifier for the image
+    Unique identifier for the image. Use a new id when replacing inline image data
+    or a video frame; input-delta telemetry uses this id instead of hashing media bytes.
     """
 
     type: Literal["image_content"] = Field(default="image_content")
@@ -222,6 +227,11 @@ ChatRole: TypeAlias = Literal["developer", "system", "user", "assistant"]
 
 # The metrics are stored in a dict, since some fields may not be relevant
 # in certain context (e.g., text-only mode or when using a speech-to-speech model).
+class MetricsMetadata(TypedDict, total=False):
+    model_name: str
+    model_provider: str
+
+
 class MetricsReport(TypedDict, total=False):
     started_speaking_at: float
     stopped_speaking_at: float
@@ -250,8 +260,34 @@ class MetricsReport(TypedDict, total=False):
     Assistant `ChatMessage` only
     """
 
+    llm_node_tps: float
+    """LLM output tokens per second for this turn, measured at the `llm_node` over the
+    streaming window (first to last text chunk). Absent for a reply that arrived in a
+    single chunk, which has no measurable rate
+
+    Assistant `ChatMessage` only
+    """
+
+    llm_node_ttfs: float
+    """Time from LLM generation start until the first sentence reached the TTS provider, as
+    segmented by that TTS. Absent when no audio came from a LiveKit TTS this turn: no TTS,
+    an interruption before the first frame, or a `tts_node` synthesizing audio on its own
+
+    Assistant `ChatMessage` only
+    """
+
     tts_node_ttfb: float
     """Time taken for the `tts_node` to return the first chunk of audio (after the first text token has been sent)
+
+    Assistant `ChatMessage` only
+    """
+
+    playback_latency: float
+    """Delay between forwarding the first audio frame and the `AudioOutput` reporting
+    playback started. Near-zero for the default room output (self-reported when the frame
+    is pushed to the track, so it doesn't account for network delivery to the client);
+    meaningful when a remote avatar worker is in the chain and reports playback via
+    the `lk.playback_started` RPC.
 
     Assistant `ChatMessage` only
     """
@@ -262,8 +298,62 @@ class MetricsReport(TypedDict, total=False):
     Assistant `ChatMessage` only
     """
 
+    provider_request_ids: list[str]
+    """Provider-known request or response IDs associated with this turn.
 
-class ChatMessage(BaseModel):
+    Assistant `ChatMessage` only. These IDs can be used to correlate a turn with
+    provider-side logs.
+    """
+
+    llm_metadata: MetricsMetadata
+    tts_metadata: MetricsMetadata
+    stt_metadata: MetricsMetadata
+
+
+class _ChatItemBase(BaseModel):
+    """Shared by every :data:`ChatItem` type; adds no fields."""
+
+    def _essential_fields(self) -> tuple[Any, ...]:
+        """What identifies this item's content beyond its id and type: what
+        :meth:`ChatContext.is_equivalent` compares and :meth:`_fingerprint` hashes.
+        Timestamps, metrics and other metadata are left out."""
+        return ()
+
+    def _fingerprint(self) -> bytes:
+        """A short digest of :meth:`_essential_fields`, to tell whether an item changed
+        without keeping a copy of it."""
+        payload = json.dumps(
+            [type(self).__name__, *self._essential_fields()],
+            ensure_ascii=False,
+            default=_fingerprint_default,
+        )
+        return hashlib.blake2b(payload.encode(), digest_size=8).digest()
+
+
+def _fingerprint_default(value: Any) -> Any:
+    # Avoid hashing inline media payloads. Their object identity detects replacement
+    # within a running session; callers should also give replacements a new image id.
+    if isinstance(value, ImageContent):
+        image_source = (
+            value.image
+            if isinstance(value.image, str) and not value.image.startswith("data:")
+            else id(value.image)
+        )
+        return [
+            "image",
+            value.id,
+            image_source,
+            value.inference_width,
+            value.inference_height,
+            value.inference_detail,
+            value.mime_type,
+        ]
+    if isinstance(value, AudioContent):
+        return ["audio", value.transcript]
+    return str(value)
+
+
+class ChatMessage(_ChatItemBase):
     id: str = Field(default_factory=lambda: utils.shortuuid("item_"))
     type: Literal["message"] = "message"
     role: ChatRole
@@ -278,7 +368,25 @@ class ChatMessage(BaseModel):
     @property
     def text_content(self) -> str | None:
         """
-        Returns a string of all text content in the message.
+        Returns a string of all text content in the message, with LiveKit's
+        expressive ``<expr/>`` tags removed from assistant messages.
+
+        Multiple text content items will be joined by a newline.
+        Use :attr:`raw_text_content` for the exact model-facing content.
+        """
+        raw = self.raw_text_content
+        if raw is None or self.role != "assistant":
+            return raw
+
+        from ..tts._provider_format import strip_expr_markup
+
+        return strip_expr_markup(raw)
+
+    @property
+    def raw_text_content(self) -> str | None:
+        """
+        Returns a string of all text content in the message, exactly as generated
+        (assistant messages may contain expressive ``<expr/>`` tags).
 
         Multiple text content items will be joined by a newline.
         """
@@ -287,11 +395,14 @@ class ChatMessage(BaseModel):
             return None
         return "\n".join(text_parts)
 
+    def _essential_fields(self) -> tuple[Any, ...]:
+        return (self.role, self.interrupted, self.content)
 
-ChatContent: TypeAlias = ImageContent | AudioContent | Instructions | str
+
+ChatContent: TypeAlias = ImageContent | AudioContent | str
 
 
-class FunctionCall(BaseModel):
+class FunctionCall(_ChatItemBase):
     id: str = Field(default_factory=lambda: utils.shortuuid("item_"))
     type: Literal["function_call"] = "function_call"
     call_id: str
@@ -306,8 +417,11 @@ class FunctionCall(BaseModel):
     should be grouped together (e.g., parallel tool calls from a single API response),
     set this to a shared value. If not set, falls back to using id for grouping."""
 
+    def _essential_fields(self) -> tuple[Any, ...]:
+        return (self.name, self.call_id, self.arguments)
 
-class FunctionCallOutput(BaseModel):
+
+class FunctionCallOutput(_ChatItemBase):
     id: str = Field(default_factory=lambda: utils.shortuuid("item_"))
     type: Literal["function_call_output"] = Field(default="function_call_output")
     name: str = Field(default="")
@@ -315,9 +429,18 @@ class FunctionCallOutput(BaseModel):
     output: str
     is_error: bool
     created_at: float = Field(default_factory=time.time)
+    reply_required: bool = Field(default=True)
+    """Whether the model should answer once it receives this output.
+
+    AgentSession uses it to decide whether to generate a follow-up reply.
+    Realtime models can also use it to schedule their response.
+    """
+
+    def _essential_fields(self) -> tuple[Any, ...]:
+        return (self.name, self.call_id, self.output, self.is_error)
 
 
-class AgentHandoff(BaseModel):
+class AgentHandoff(_ChatItemBase):
     id: str = Field(default_factory=lambda: utils.shortuuid("item_"))
     type: Literal["agent_handoff"] = Field(default="agent_handoff")
     old_agent_id: str | None = None
@@ -325,11 +448,11 @@ class AgentHandoff(BaseModel):
     created_at: float = Field(default_factory=time.time)
 
 
-class AgentConfigUpdate(BaseModel):
+class AgentConfigUpdate(_ChatItemBase):
     id: str = Field(default_factory=lambda: utils.shortuuid("item_"))
     type: Literal["agent_config_update"] = Field(default="agent_config_update")
 
-    instructions: Instructions | str | None = None
+    instructions: str | None = None
     tools_added: list[str] | None = None
     tools_removed: list[str] | None = None
 
@@ -388,7 +511,9 @@ class ChatContext:
         if is_given(extra):
             kwargs["extra"] = extra
 
-        if isinstance(content, str):
+        if isinstance(content, Instructions):
+            message = ChatMessage(role=role, content=[str(content)], **kwargs)
+        elif isinstance(content, str):
             message = ChatMessage(role=role, content=[content], **kwargs)
         else:
             message = ChatMessage(role=role, content=content, **kwargs)
@@ -407,6 +532,16 @@ class ChatContext:
         for _item in items:
             idx = self.find_insertion_index(created_at=_item.created_at)
             self._items.insert(idx, _item)
+
+    def remove(self, item: ChatItem | str) -> None:
+        """Remove the first item from the chat context by ChatItem or item ID.
+
+        Raises ValueError if the item/ID is not found.
+        """
+        idx = self.index_by_id(item.id if not isinstance(item, str) else item)
+        if idx is None:
+            raise ValueError(f"Item not found: {item!r}")
+        self._items.pop(idx)
 
     def get_by_id(self, item_id: str) -> ChatItem | None:
         return next((item for item in self.items if item.id == item_id), None)
@@ -443,6 +578,13 @@ class ChatContext:
                     continue
 
         valid_tools = set(get_tool_names(tools)) if tools else set()
+        # FunctionCallOutput.name is optional, so an output that has none is paired with its
+        # call by call_id instead
+        valid_call_ids = {
+            item.call_id
+            for item in self.items
+            if item.type == "function_call" and item.name in valid_tools
+        }
         for item in self.items:
             if exclude_function_call and item.type in [
                 "function_call",
@@ -466,12 +608,16 @@ class ChatContext:
             if exclude_config_update and item.type == "agent_config_update":
                 continue
 
-            if (
-                is_given(tools)
-                and (item.type == "function_call" or item.type == "function_call_output")
-                and item.name not in valid_tools
-            ):
-                continue
+            if is_given(tools):
+                if item.type == "function_call" and item.name not in valid_tools:
+                    continue
+
+                if item.type == "function_call_output" and (
+                    item.name not in valid_tools
+                    if item.name
+                    else item.call_id not in valid_call_ids
+                ):
+                    continue
 
             items.append(item)
 
@@ -483,7 +629,13 @@ class ChatContext:
         Removes leading function calls to avoid partial function outputs.
         Preserves the first instruction message (system/developer) by adding it back
         to the beginning.
+
+        A `max_items` of 0 leaves nothing but that instruction: it asks for no conversational
+        items, so none are kept. A negative value is a programming error and raises ValueError.
         """
+
+        if max_items < 0:
+            raise ValueError("max_items must be non-negative")
 
         if len(self._items) <= max_items:
             return self
@@ -497,7 +649,9 @@ class ChatContext:
             None,
         )
 
-        new_items = self._items[-max_items:]
+        # `-0` is `0` and `items[0:]` is the whole list, so a zero budget would otherwise
+        # keep every item.
+        new_items = self._items[-max_items:] if max_items else []
 
         # chat_ctx shouldn't start with function_call or function_call_output
         while new_items and new_items[0].type in [
@@ -556,6 +710,7 @@ class ChatContext:
         exclude_function_call: bool = False,
         exclude_metrics: bool = False,
         exclude_config_update: bool = False,
+        strip_markup: bool = False,
     ) -> dict[str, Any]:
         items: list[ChatItem] = []
         for item in self.items:
@@ -574,6 +729,13 @@ class ChatContext:
                     item.content = [c for c in item.content if not isinstance(c, ImageContent)]
                 if exclude_audio:
                     item.content = [c for c in item.content if not isinstance(c, AudioContent)]
+                # only strip the <expr/> dialect, and only in assistant messages
+                if strip_markup and item.role == "assistant":
+                    from ..tts._provider_format import strip_expr_markup
+
+                    item.content = [
+                        strip_expr_markup(c) if isinstance(c, str) else c for c in item.content
+                    ]
 
             items.append(item)
 
@@ -605,7 +767,11 @@ class ChatContext:
 
     @overload
     def to_provider_format(
-        self, format: Literal["google"], *, inject_dummy_user_message: bool = True
+        self,
+        format: Literal["google"],
+        *,
+        inject_dummy_user_message: bool = True,
+        thought_signatures: dict[str, bytes] | None = None,
     ) -> tuple[list[dict], _provider_format.google.GoogleFormatData]: ...
 
     @overload
@@ -621,7 +787,7 @@ class ChatContext:
     @overload
     def to_provider_format(
         self, format: Literal["mistralai"], *, inject_dummy_user_message: bool = True
-    ) -> tuple[list[dict], Literal[None]]: ...
+    ) -> tuple[list[dict], _provider_format.mistralai.MistralFormatData]: ...
 
     @overload
     def to_provider_format(self, format: str, **kwargs: Any) -> tuple[list[dict], Any]: ...
@@ -655,7 +821,9 @@ class ChatContext:
         elif format == "anthropic":
             return _provider_format.anthropic.to_chat_ctx(self, **kwargs)
         elif format == "mistralai":
-            return _provider_format.mistralai.to_chat_ctx(self, **kwargs)
+            return _provider_format.mistralai.to_conversations_ctx(
+                self, inject_dummy_user_message=inject_dummy_user_message
+            )
         else:
             raise ValueError(f"Unsupported provider format: {format}")
 
@@ -672,46 +840,98 @@ class ChatContext:
 
         return 0
 
+    def _upsert_item(self, item: ChatItem, *, allow_type_mismatch: bool = False) -> None:
+        """Update an item with the same ID if it exists, otherwise insert it by creation time."""
+        idx = self.index_by_id(item.id)
+        if idx is not None:
+            if not allow_type_mismatch and item.type != self._items[idx].type:
+                raise ValueError(f"Item type mismatch: {item.type} != {self._items[idx].type}")
+            self._items[idx] = item
+        else:
+            self.insert(item)
+
     async def _summarize(
         self,
         llm_v: LLM,
         *,
         keep_last_turns: int = 2,
     ) -> ChatContext:
-        to_summarize: list[ChatMessage] = []
-        for msg in self.messages():
-            if msg.role not in ("user", "assistant"):
-                continue
-            if msg.extra.get("is_summary") is True:  # avoid making summary of summaries
-                continue
+        # Split self.items into head/tail. Walk backward, counting only
+        # user/assistant ChatMessages toward the keep_last_turns budget (each
+        # turn = one user + one assistant message, so budget = keep_last_turns * 2).
+        # Everything from the split point onward — including any interleaved
+        # FunctionCall/FunctionCallOutput items — is preserved as-is in the tail.
+        msg_budget = keep_last_turns * 2
+        split_idx = len(self.items)
 
-            text = (msg.text_content or "").strip()
-            if text:
-                to_summarize.append(msg)
+        if msg_budget > 0:
+            msg_count = 0
+            for i in range(len(self.items) - 1, -1, -1):
+                item = self.items[i]
+                if isinstance(item, ChatMessage) and item.role in ("user", "assistant"):
+                    msg_count += 1
+                    if msg_count >= msg_budget:
+                        split_idx = i
+                        break
+            else:
+                # Not enough messages to fill the budget — nothing to summarize
+                return self
+
+        if split_idx == 0:
+            return self
+
+        head_items, tail_items = self.items[:split_idx], self.items[split_idx:]
+
+        # Build summarization input from head_items only.
+        to_summarize: list[ChatMessage | FunctionCall | FunctionCallOutput] = []
+        for item in head_items:
+            if isinstance(item, ChatMessage):
+                if item.role not in ("user", "assistant"):
+                    continue
+                if item.extra.get("is_summary") is True:  # avoid making summary of summaries
+                    continue
+
+                if (item.text_content or "").strip():
+                    to_summarize.append(item)
+            elif isinstance(item, (FunctionCall, FunctionCallOutput)):
+                to_summarize.append(item)
+
         if not to_summarize:
             return self
 
-        tail_n = max(0, min(len(to_summarize), keep_last_turns * 2))
-        if tail_n == 0:
-            head, tail = to_summarize, []
-        else:
-            head, tail = to_summarize[:-tail_n], to_summarize[-tail_n:]
+        # Render items to XML format and collect the contents.
+        contents: list[str] = []
+        for m in to_summarize:
+            if isinstance(m, (FunctionCall, FunctionCallOutput)):
+                contents.append(_function_call_item_to_message(m).raw_text_content or "")
+            else:
+                contents.append(to_xml(m.role, (m.text_content or "").strip()))
 
-        if not head:
-            return self
+        source_text = "\n".join(contents).strip()
 
-        source_text = "\n".join(f"{m.role}: {(m.text_content or '').strip()}" for m in head).strip()
         if not source_text:
             return self
 
         chat_ctx = ChatContext()
         chat_ctx.add_message(
             role="system",
-            content=(
-                "Compress older chat history into a short, faithful summary.\n"
-                "Focus on user goals, constraints, decisions, key facts/preferences/entities, and pending tasks.\n"
-                "Exclude chit-chat and greetings. Be concise."
-            ),
+            content=textwrap.dedent("""\
+                Compress older conversation history into a short, faithful summary.
+
+                The conversation is formatted as XML. Here is how to read it:
+                - <user>…</user>  — something the user said.
+                - <assistant>…</assistant>  — something the assistant said.
+                - <function_call name="…" call_id="…">…</function_call>  — the assistant invoked an action.
+                - <function_call_output name="…" call_id="…">…</function_call_output>  — the result of that \
+                action. May contain <error>…</error> if it failed.
+
+                Guidelines:
+                - Distill the *information learned* from function call outputs into the summary. \
+                Do not mention that a tool/function was called — just preserve the knowledge gained.
+                - Focus on: user goals, constraints, decisions, key facts, preferences, entities, \
+                and any pending or unresolved tasks.
+                - Omit greetings, filler, and chit-chat.
+                - Be concise."""),
         )
         chat_ctx.add_message(
             role="user",
@@ -728,33 +948,31 @@ class ChatContext:
         if not summary:
             return self
 
-        tail_start_ts = tail[0].created_at if tail else float("inf")
-
+        # Rebuild self._items. From head_items, keep only structural
+        # items (system messages, agent handoffs, config updates, prior
+        # summaries) — everything summarizable is replaced by the summary.
+        # Tail items are appended as-is.
         preserved: list[ChatItem] = []
-        for it in self.items:
-            if (
-                it.type in ("function_call", "function_call_output")
-                and it.created_at < tail_start_ts
-            ):
+        for it in head_items:
+            if isinstance(it, ChatMessage) and it.role in ("user", "assistant"):
                 continue
-
-            if it.type == "message" and it.role in ("user", "assistant"):
+            if isinstance(it, (FunctionCall, FunctionCallOutput)):
                 continue
-
             preserved.append(it)
 
         self._items = preserved
 
-        created_at_hint = (tail[0].created_at - 1e-6) if tail else (head[-1].created_at + 1e-6)
+        created_at_hint = (
+            (tail_items[0].created_at - 1e-6) if tail_items else (head_items[-1].created_at + 1e-6)
+        )
         self.add_message(
             role="assistant",
-            content=f"[history summary]\n{summary}",
+            content=to_xml("chat_history_summary", summary),
             created_at=created_at_hint,
             extra={"is_summary": True},
         )
 
-        for msg in tail:
-            self._items.append(msg)
+        self._items.extend(tail_items)
 
         return self
 
@@ -763,6 +981,9 @@ class ChatContext:
         item_adapter = TypeAdapter(list[ChatItem])
         items = item_adapter.validate_python(data["items"])
         return cls(items)
+
+    def to_proto(self) -> agent_pb.ChatContext:
+        return agent_pb.ChatContext(items=[encode_chat_item(item) for item in self.items])
 
     @property
     def readonly(self) -> bool:
@@ -778,7 +999,8 @@ class ChatContext:
           - Function calls: compares `name`, `call_id`, and `arguments`.
           - Function call outputs: compares `name`, `call_id`, `output`, and `is_error`.
 
-        Does not consider timestamps or other metadata.
+        Does not consider timestamps or other metadata. Each item type declares its fields
+        in ``_essential_fields``, which item fingerprints hash as well.
         """
         if self is other:
             return True
@@ -786,28 +1008,10 @@ class ChatContext:
         if len(self.items) != len(other.items):
             return False
 
-        for a, b in zip(self.items, other.items, strict=False):
-            if a.id != b.id or a.type != b.type:
-                return False
-
-            if a.type == "message" and b.type == "message":
-                if a.role != b.role or a.interrupted != b.interrupted or a.content != b.content:
-                    return False
-
-            elif a.type == "function_call" and b.type == "function_call":
-                if a.name != b.name or a.call_id != b.call_id or a.arguments != b.arguments:
-                    return False
-
-            elif a.type == "function_call_output" and b.type == "function_call_output":
-                if (
-                    a.name != b.name
-                    or a.call_id != b.call_id
-                    or a.output != b.output
-                    or a.is_error != b.is_error
-                ):
-                    return False
-
-        return True
+        return all(
+            a.id == b.id and a.type == b.type and a._essential_fields() == b._essential_fields()
+            for a, b in zip(self.items, other.items, strict=True)
+        )
 
 
 class _ReadOnlyChatContext(ChatContext):
@@ -824,7 +1028,7 @@ class _ReadOnlyChatContext(ChatContext):
             raise RuntimeError(_ReadOnlyChatContext.error_msg)
 
         # override all mutating methods to raise errors
-        append = extend = pop = remove = clear = sort = reverse = _raise_error  # type: ignore
+        append = extend = insert = pop = remove = clear = sort = reverse = _raise_error  # type: ignore
         __setitem__ = __delitem__ = __iadd__ = __imul__ = _raise_error  # type: ignore
 
         def copy(self) -> list[ChatItem]:
@@ -834,5 +1038,74 @@ class _ReadOnlyChatContext(ChatContext):
         self._items = self._ImmutableList(items)
 
     @property
+    def items(self) -> list[ChatItem]:
+        return self._items
+
+    @items.setter
+    def items(self, items: list[ChatItem]) -> None:
+        logger.error(_ReadOnlyChatContext.error_msg)
+        raise RuntimeError(_ReadOnlyChatContext.error_msg)
+
+    @property
     def readonly(self) -> bool:
         return True
+
+
+def _to_attrs_str(attrs: dict[str, Any] | None = None) -> str | None:
+    if attrs:
+        return " ".join([f'{k}="{v}"' for k, v in attrs.items()])
+    return None
+
+
+def to_xml(
+    tag_name: str,
+    content: str | None = None,
+    attrs: dict[str, Any] | None = None,
+) -> str:
+    attrs_str = _to_attrs_str(attrs)
+
+    if content:
+        return "\n".join(
+            [
+                f"<{tag_name} {attrs_str}>" if attrs_str else f"<{tag_name}>",
+                content,
+                f"</{tag_name}>",
+            ]
+        )
+    else:
+        return f"<{tag_name} {attrs_str} />" if attrs_str else f"<{tag_name} />"
+
+
+def _function_call_item_to_message(item: FunctionCall | FunctionCallOutput) -> ChatMessage:
+    if isinstance(item, FunctionCall):
+        return ChatMessage(
+            role="user",
+            content=[
+                to_xml(
+                    "function_call",
+                    item.arguments,
+                    attrs={
+                        "name": item.name,
+                        "call_id": item.call_id,
+                    },
+                )
+            ],
+            created_at=item.created_at,
+            extra={"is_function_call": True},
+        )
+    elif isinstance(item, FunctionCallOutput):
+        return ChatMessage(
+            role="assistant",
+            content=[
+                to_xml(
+                    "function_call_output",
+                    item.output if not item.is_error else to_xml("error", item.output),
+                    attrs={
+                        "call_id": item.call_id,
+                        "name": item.name,
+                    },
+                )
+            ],
+            created_at=item.created_at,
+            extra={"is_function_call_output": True},
+        )

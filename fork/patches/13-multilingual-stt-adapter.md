@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **Status** | Opt-in (new class; used only when the app wraps its STT with it) |
-| **Origin** | Fork commits `e58f51d` (short-loop/agents#60), `79c0347` (short-loop/agents#61), `062d5dc` (short-loop/agents#62) |
-| **Depends on** | Patch 11 (per-word language tags, `detected_languages`), Patch 12 (Deepgram timestamp continuity) |
+| **Origin** | 1.4.6: fork commits `e58f51d` (short-loop/agents#60), `79c0347` (short-loop/agents#61), `062d5dc` (short-loop/agents#62). 1.8.3: `d751a2ac1` (P10) with the hook forwarding below |
+| **Depends on** | Patch 11 (per-word language tags; `source_languages`), Patch 12 (Deepgram timestamp continuity) |
 | **Automated tests** | `tests/test_stt_multilingual.py` (25 async tests), `tests/test_multilingual_heuristics.py` (19 tests), helper `tests/fake_multilingual_stt.py` (`ScriptedSTT` / `ScriptedStream`: streams that emit exactly the events a test injects and record received frames / flushes) |
 | **Example** | `examples/voice_agents/multilingual_switching.py` |
 
@@ -27,8 +27,11 @@ All exported from `livekit.agents.stt` (and `livekit.agents.stt.multilingual`):
   be streaming-capable (wrap others with `stt.StreamAdapter`); `initial_language` must be
   in the allowlist if one is set; `switch_mode="recreate"` requires a factory. When only
   a factory is given, the adapter builds and owns the initial primary. Capabilities
-  mirror the primary's (always streaming). `model` "MultilingualAdapter", `provider`
-  "livekit".
+  mirror the primary's (always streaming; `keyterms` and `chat_context` copied too).
+  `model` "MultilingualAdapter", `provider` "livekit".
+  - Framework STT hooks are forwarded to **both** children: `_update_session_keyterms`
+    (remembered and re-applied to primaries built later by the factory),
+    `_push_conversation_item`, `prewarm`.
   - `current_language` property, `options` property.
   - `async switch_language(language, *, reason="manual")` — manual switch (e.g. from an
     LLM function tool). Raises `LanguageNotAllowedError` for non-allowlisted languages and
@@ -240,14 +243,17 @@ upstream contracts below and re-adding the exports in `stt/__init__.py`. Patches
 ## Upstream contracts relied upon (check after every sync)
 
 - `stt.STT`: constructor with `capabilities=STTCapabilities(...)` (fields `streaming`,
-  `interim_results`, `diarization`, `aligned_transcript`, `offline_recognize`),
-  `recognize` / `_recognize_impl` signatures, `stream(language=, conn_options=)`, event
-  emitter (`on`, `off`, `emit`) and the `metrics_collected` event.
+  `interim_results`, `diarization`, `aligned_transcript`, `offline_recognize`,
+  `keyterms`, `chat_context`), `recognize` / `_recognize_impl` signatures,
+  `stream(language=, conn_options=)`, the hooks `_update_session_keyterms` /
+  `_push_conversation_item` / `prewarm`, event emitter (`on`, `off`, `emit`) and the
+  `metrics_collected` event.
 - `stt.RecognizeStream` internals: `__init__(stt=, conn_options=, sample_rate=)`,
   `_run`, `_input_ch`, `_FlushSentinel`, `_event_ch`, `_start_time_offset` and the
-  `start_time_offset` property (overridden), `_emit_error(exc, recoverable=)`,
-  `_metrics_monitor_task`, `_conn_options`, `push_frame`, `flush`, `end_input`, `aclose`,
-  and the base class retry behaviour on `APIError`.
+  `start_time_offset` property (overridden), the 1.5+ `start_time` wall-clock anchor,
+  `_emit_error(exc, recoverable=)`, `_metrics_monitor_task`, `_conn_options`,
+  `push_frame`, `flush`, `end_input`, `aclose`, and the base class retry behaviour on
+  `APIError` (including the wall-clock `_start_time_offset` bump in `_main_task`).
 - `SpeechEvent` / `SpeechData` fields (`start_time`, `end_time`, `confidence`,
   `language`, `words`, `text`) and `SpeechEventType` members including
   `PREFLIGHT_TRANSCRIPT` and `RECOGNITION_USAGE`.
@@ -270,8 +276,8 @@ upstream contracts below and re-adding the exports in `stt/__init__.py`. Patches
 ## Verification after sync
 
 - `tests/test_stt_multilingual.py`, `tests/test_multilingual_heuristics.py`,
-  `tests/test_multilingual_deepgram_mapping.py` pass (remember they are **not** in the
-  `make unit-tests` list — run them explicitly).
+  `tests/test_multilingual_deepgram_mapping.py` pass (all `pytest.mark.unit`, so
+  `make unit-tests` runs them).
 - Type check passes for the `stt/multilingual/` package.
 - The example still imports (`stt.MultilingualAdapter`, `stt.LanguageSwitchOptions`,
   event classes, `stt.LanguageNotAllowedError`, `stt.LanguageSwitchFailedError`).
@@ -279,6 +285,9 @@ upstream contracts below and re-adding the exports in `stt/__init__.py`. Patches
 ## Known caveats
 
 - Two live STT connections per call (roughly double STT cost).
+- Deepgram v2 (Flux, `stt_v2.py`) has no `update_options(language=)`: with it as primary
+  only the factory (`recreate`) executor works.
+- Irrelevant for realtime-model sessions (no STT in the reply path).
 - `_HeuristicEngine.on_primary_event` is a reserved no-op (hook for future
   text-mismatch signals).
 - Script table is coarse (Latin-script languages cannot be distinguished by script;
