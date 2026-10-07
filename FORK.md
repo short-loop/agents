@@ -31,8 +31,8 @@ dynamic-endpointing comparison).
 | Upstream repository | `https://github.com/livekit/agents` (default branch `main`) |
 | Fork repository | `https://github.com/short-loop/agents` |
 | Fork working branch | `patched-1.8` — the 1.8.x line, one fork commit per patch on top of the base below. `patched` is the frozen 1.4.6 line (base `29b71d4`), kept while production releases still ship from it. `main` mirrors upstream `main` exactly. |
-| Current upstream base | commit `1983c39b` — "livekit-agents@1.8.3 (#7429)" (2026-09-26), tag `livekit-agents@1.8.3` |
-| Package version on the base | `livekit-agents` 1.8.3 (plugins at their matching 1.8.3 versions); `requires-python >= 3.10` |
+| Current upstream base | commit `76de1759b` — "livekit-agents@1.8.5 (#7642)" (2026-10-07), tag `livekit-agents@1.8.5`, merged as `7a04a2297`. Previous base: `1983c39b` (1.8.3). |
+| Package version on the base | `livekit-agents` 1.8.5 (plugins at their matching 1.8.5 versions; runtime pin `livekit==1.1.20`); `requires-python >= 3.10` |
 | Fork delta vs. base | 35 files, ~5.1k lines added, ~10 lines removed (≈ 60% is tests and the new multilingual STT package) |
 | Fork PR numbering | Fork PRs are `short-loop/agents#NN` (two-digit). Upstream PRs are `livekit/agents#NNNN` (four-digit). Commit subjects keep upstream's `(#NNNN)` suffix for upstream commits and `(#NN)` for fork commits. |
 | Ticket references | `SL-3890` = interruption-backoff work (patches 04, 05). |
@@ -63,11 +63,13 @@ dynamic-endpointing comparison).
 | `1ede41bd3` | feat(voice): make the P5/P6 endpointing behaviours EndpointingOptions keys | 02, 03 |
 | `19dabfdac` | feat(voice): interruption-backoff modes (P9, SL-3890) | 04, 05 |
 | `7f8e31138` | fix(voice): make the interruption-backoff activity hooks mock-safe (P9) | 04 |
-| (next) | chore: number fork markers after fork/patches docs; docs(fork) for 1.8 | — |
+| `c4acb76b5`, `e6342f30b` | chore: number fork markers after fork/patches docs; docs(fork) for the 1.8.3 line | — |
+| `64e70183b` | feat(elevenlabs): support eleven_v4 and eleven_v4_turbo — cherry-pick of upstream `7d3a90714`, superseded by the 1.8.5 merge | — |
+| `7a04a2297` | Merge tag `livekit-agents@1.8.5` (sync 2026-10-07: no conflicts, upstream touched only telemetry hunks in the hot-spot files) | — |
 
 The quickest way to see the complete fork delta is a diff between the upstream base
 commit and the tip of `patched-1.8`. After a sync, the new upstream base commit replaces
-`1983c39b` in the table above.
+`76de1759b` in the table above.
 
 ---
 
@@ -172,7 +174,7 @@ automated agent but works the same for a human.
 1. Add upstream as a remote (the fork checkout only has `origin`) and fetch upstream
    `main` plus tags.
 2. Determine the current base: the most recent upstream commit reachable from
-   `patched-1.8` (today `1983c39b`). Record the list of new upstream commits since that
+   `patched-1.8` (today `76de1759b`). Record the list of new upstream commits since that
    base.
 3. Create a working branch from `patched-1.8` (never sync directly on it).
 4. Skim the new upstream commits and flag any that touch files in the hot-spot map

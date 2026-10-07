@@ -232,5 +232,6 @@ signals we use; only the EOU-threshold composition would stay in `_bounce_eou_ta
 - [x] P9: tracker module, D3 hold event, `turn_handling["interruption_backoff"]` + kwarg alias, flat per-mode delays layered on the active endpointing object (kept independent of dynamic endpointing for incremental rollout)
 - [ ] App: python 3.10, `turn_handling=…` incl. `endpointing.sleep_floor=0.5`, `endpointing.stale_anchor_raw_delay=True`, `interruption.backchannel_words/commit_words`; explicit preemptive setting; `lk agent`; `interruption.mode` left to auto (resolves to vad)
 - [ ] Observability: OTel attribute renames, `lk.pii.*` keys, `eou sleep` extra fields, dashboard JSON
-- [ ] Tag `1.8.3-shortloop.1`, smoke calls (multilingual UAT set, interruption-heavy call)
+- [x] Preview tags `1.8.3-shortloop.preview.1/.2` for the iris trial; `patched-1.8` merged to upstream 1.8.5 on 2026-10-07 (clean) and tagged `1.8.5-shortloop.1` for the production rollout
+- [ ] Smoke calls on `1.8.5-shortloop.1` (multilingual UAT set, interruption-heavy call)
 - [ ] Later: P14 own interruption detector; realtime-model pilot
